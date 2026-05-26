@@ -23,6 +23,7 @@
 
 ## 🎉News
 
+- **[2026-05-26]** Our top-k OPD overlap diagnostics have been merged into [verl](https://github.com/verl-project/verl/pull/6469), adding `distillation/overlap_ratio` and `distillation/overlap_token_advantage` metrics following our token-level analysis.
 - **[2026-04-15]** We investigate the dynamics and mechanisms of on-policy distillation (OPD) of LLMs, and propose practical strategies to recover failing OPD. Check it out: [Paper](https://arxiv.org/pdf/2604.13016).
 
 ## 📖Overview
@@ -83,13 +84,18 @@ bash on_policy_distillation.sh
 | `N_RESPONSES` | `4` | Number of rollout responses generated per prompt |
 | `MAX_PROMPT_LENGTH` | `1024` | Maximum token length for prompts |
 | `MAX_RESP_LENGTH` | `7168` | Maximum token length for responses during training |
-| `MAX_VAL_RESP_LENGTH` | `31744` | Maximum token length for responses during validation (set larger to ensure complete generation) |
+| `MAX_VAL_RESP_LENGTH` | `7168` | Maximum token length for responses during verl-side validation; we recommend setting it equal to `MAX_RESP_LENGTH` |
+| `trainer.test_freq` | `-1` | Disable in-training validation in verl v0.7.0 and evaluate checkpoints separately with `scripts/val/` |
 | **Top-K & Weighting Strategy** |||
 | `LOG_PROB_TOP_K` | `16` | Number of Top-K tokens retained when computing token-level rewards; setting to `0` falls back to sampled-token OPD |
 | `TOP_K_STRATEGY` | `only_stu` | Strategy for selecting the Top-K token set. Options: `only_stu` (select Top-K from the student, then query the teacher for corresponding log-probs), `only_tch` (select Top-K from the teacher), `intersection` (keep tokens appearing in both student and teacher Top-K), `union` (merge student and teacher Top-K), `union-intersection` (tokens in either Top-K but not both, i.e. symmetric difference) |
 | `REWARD_WEIGHT_MODE` | `student_p` | Weighting scheme for token rewards. `student_p`: weighted by student probability; `teacher_p`: weighted by teacher probability; `none`: no weighting |
 
 </details>
+
+
+> [!IMPORTANT]
+> **Validation in verl v0.7.0.** We found that the built-in validation path in verl v0.7.0 can **substantially under-estimate** model performance, typically by 5--7 percentage points in our runs. This issue has been fixed in verl v0.8.0. For users reproducing our experiments with verl v0.7.0, we recommend setting `MAX_VAL_RESP_LENGTH=MAX_RESP_LENGTH` and disabling in-training validation with `trainer.test_freq=-1`, then running final validation separately with our evaluation scripts under `scripts/val/`. We thank [Pengyuan Wang, PhD](mailto:wangpy@lamda.nju.edu.cn) for bringing this issue to our attention.
 
 > [!NOTE]
 > You can use `scripts/infer/dedup_deepmath.py` to deduplicate DeepMath against DAPO-Math-17K and avoid data overlap, as the experiments shown in Section 5.2 in our paper.
