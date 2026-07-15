@@ -1,0 +1,15 @@
+
+opd-cu118-before.txt
+opd-cu118-after.txt
+/model/
+/checkpoint/
+/logs/
+/validation_log/
+/swanlab/
+*.parquet
+*.safetensors
+*.pt
+
+# Leonardo generated artifacts
+/outputs/
+/verl/flash_attn-*.whl
