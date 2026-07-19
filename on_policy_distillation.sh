@@ -12,7 +12,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 
-set -x
+set -exo pipefail
 
 # Configure logging when running outside SBATCH.
 if [ -z "$SLURM_JOB_ID" ]; then

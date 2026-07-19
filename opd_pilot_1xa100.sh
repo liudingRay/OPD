@@ -26,6 +26,6 @@ export TRAINER_LOGGER='["console","wandb"]'
 # The original launcher keeps these debug flags enabled by default.  They are
 # unnecessary for this throughput-oriented pilot and slow GPU execution.
 export CUDA_LAUNCH_BLOCKING=0
-export TORCH_DISTRIBUTED_DEBUG=WARN
+export TORCH_DISTRIBUTED_DEBUG=OFF
 
 exec bash on_policy_distillation.sh
