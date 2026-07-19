@@ -29,6 +29,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
 fi
 
 ray stop --force
+unset ROCR_VISIBLE_DEVICES
 export RAY_memory_usage_threshold=0.99
 export CUDA_LAUNCH_BLOCKING=${CUDA_LAUNCH_BLOCKING:-1}
 # export CUDA_VISIBLE_DEVICES=1,2,3,4
