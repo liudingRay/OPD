@@ -19,8 +19,14 @@ set -eo pipefail
 
 PROJECT_DIR=/leonardo_work/EUHPC_D29_082/OPD-experiment/OPD
 CONDA_BASE=/leonardo/home/userexternal/jbi00000/miniconda3
+WANDB_DIR=/leonardo_work/EUHPC_D29_082/OPD-experiment/.cache/opd/wandb
 
 mkdir -p "$PROJECT_DIR/logs"
+mkdir -p "$WANDB_DIR"
+# Compute nodes have no internet access.  Store W&B records locally, then run
+# `wandb sync` from a networked login node after the job completes.
+export WANDB_MODE=offline
+export WANDB_DIR
 source "$CONDA_BASE/etc/profile.d/conda.sh"
 conda activate "$WORK/$USER/conda_envs/opd-cu118"
 
