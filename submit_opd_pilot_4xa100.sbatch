@@ -7,9 +7,9 @@
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:4
+#SBATCH --gres=gpu:a100:4
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=500G
+#SBATCH --mem=480G
 #SBATCH --time=08:00:00
 #SBATCH --output=/leonardo_work/EUHPC_D29_082/OPD-experiment/OPD/logs/%x-%j.out
 #SBATCH --error=/leonardo_work/EUHPC_D29_082/OPD-experiment/OPD/logs/%x-%j.err
