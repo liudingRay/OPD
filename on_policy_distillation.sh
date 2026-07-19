@@ -163,6 +163,23 @@ fi
 PPO_MAX_TOKEN_LEN_PER_GPU=$(( ((1024 + MAX_RESP_LENGTH) > 32768) ? (1024 + MAX_RESP_LENGTH) : 32768))
 echo "PPO_MAX_TOKEN_LEN_PER_GPU: $PPO_MAX_TOKEN_LEN_PER_GPU"
 
+# Keep mutable caches on the shared work filesystem.  Leonardo Booster nodes
+# have limited local temporary storage, which is insufficient for datasets'
+# Arrow cache and vLLM/Triton compilation artifacts.
+export OPD_CACHE_ROOT=${OPD_CACHE_ROOT:-/leonardo_work/EUHPC_D29_082/OPD-experiment/.cache/opd}
+export TRITON_CACHE_DIR="$OPD_CACHE_ROOT/triton"
+export TORCHINDUCTOR_CACHE_DIR="$OPD_CACHE_ROOT/torchinductor"
+export HF_HOME="$OPD_CACHE_ROOT/huggingface"
+export HF_DATASETS_CACHE="$HF_HOME/datasets"
+export HF_HUB_CACHE="$HF_HOME/hub"
+export OUTLINES_CACHE_DIR="$OPD_CACHE_ROOT/outlines/$(uuidgen)"
+
+mkdir -p "$TRITON_CACHE_DIR" \
+         "$TORCHINDUCTOR_CACHE_DIR" \
+         "$HF_DATASETS_CACHE" \
+         "$HF_HUB_CACHE" \
+         "$OUTLINES_CACHE_DIR" \
+         "$OPD_CACHE_ROOT/verl-rlhf"
 
 ray start --head
 sleep 5
@@ -172,6 +189,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=$ADV_ESTIMATOR \
     algorithm.grpo_outcome_weight=$GRPO_OUTCOME_WEIGHT \
     data.shuffle=False \
+    +data.cache_dir="$OPD_CACHE_ROOT/verl-rlhf" \
     data.train_files="$TRAIN_DATASET" \
     data.train_max_samples=${TRAIN_MAX_SAMPLES:--1} \
     data.val_files="$TEST_DATASET" \
@@ -189,6 +207,7 @@ python3 -m verl.trainer.main_ppo \
     $LR_ARGS \
     actor_rollout_ref.actor.ppo_mini_batch_size=$MINI_BATCH_SIZE \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
+    actor_rollout_ref.actor.use_torch_compile=False \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$PPO_MAX_TOKEN_LEN_PER_GPU \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=$PARALLEL_SIZE \
@@ -203,6 +222,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.model_dtype=$MODEL_DTYPE \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.enforce_eager=True \
     actor_rollout_ref.rollout.temperature=$TEMPERATURE \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     +actor_rollout_ref.rollout.log_prob_top_k=$LOG_PROB_TOP_K \
