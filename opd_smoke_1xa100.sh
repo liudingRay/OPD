@@ -191,7 +191,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=$ADV_ESTIMATOR \
     algorithm.grpo_outcome_weight=$GRPO_OUTCOME_WEIGHT \
     data.shuffle=False \
-    data.cache_dir="$OPD_CACHE_ROOT/verl-rlhf" \
+    +data.cache_dir="$OPD_CACHE_ROOT/verl-rlhf" \
     data.train_files="$TRAIN_DATASET" \
     data.val_files="$TEST_DATASET" \
     data.train_batch_size=$((${MINI_BATCH_SIZE}*${PARALLEL_SIZE})) \
