@@ -13,7 +13,9 @@
 #SBATCH --output=/leonardo_work/EUHPC_D29_082/OPD-experiment/OPD/logs/%x-%j.out
 #SBATCH --error=/leonardo_work/EUHPC_D29_082/OPD-experiment/OPD/logs/%x-%j.err
 
-set -euo pipefail
+# Do not enable `set -u`: Conda's binutils_linux-64 activation hook references
+# optional variables such as ADDR2LINE before defining them.
+set -eo pipefail
 
 PROJECT_DIR=/leonardo_work/EUHPC_D29_082/OPD-experiment/OPD
 CONDA_BASE=/leonardo/home/userexternal/jbi00000/miniconda3
