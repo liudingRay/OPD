@@ -80,5 +80,10 @@ for ((NODE_INDEX = 1; NODE_INDEX < ${#NODES[@]}; NODE_INDEX++)); do
     sleep 5
 done
 
-srun --overlap --nodes=1 --ntasks=1 -w "$HEAD_NODE" ray status
+# Some Ray releases can report a transient cluster-metadata error in the
+# status CLI even though a driver can connect normally.  Do not let this
+# diagnostic command terminate the training job; main_ppo verifies the actual
+# Ray connection immediately afterwards.
+srun --overlap --nodes=1 --ntasks=1 -w "$HEAD_NODE" ray status --address="$RAY_ADDRESS" \
+    || echo "Warning: ray status failed; continuing to the driver connection test."
 srun --overlap --nodes=1 --ntasks=1 -w "$HEAD_NODE" bash opd_pilot_2node_1xa100.sh
