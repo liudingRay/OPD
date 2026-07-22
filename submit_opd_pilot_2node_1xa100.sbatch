@@ -68,14 +68,14 @@ echo "Allocated nodes: ${SLURM_JOB_NODELIST}"
 echo "Ray head: ${RAY_ADDRESS}"
 
 srun --overlap --nodes=1 --ntasks=1 -w "$HEAD_NODE" \
-    ray start --head --node-ip-address="$HEAD_IP" --port="$RAY_PORT" \
+    env -u ROCR_VISIBLE_DEVICES ray start --head --node-ip-address="$HEAD_IP" --port="$RAY_PORT" \
     --num-cpus="$SLURM_CPUS_PER_TASK" --num-gpus=1 --block &
 sleep 10
 
 for ((NODE_INDEX = 1; NODE_INDEX < ${#NODES[@]}; NODE_INDEX++)); do
     WORKER_NODE=${NODES[$NODE_INDEX]}
     srun --overlap --nodes=1 --ntasks=1 -w "$WORKER_NODE" \
-        ray start --address="$RAY_ADDRESS" --num-cpus="$SLURM_CPUS_PER_TASK" \
+        env -u ROCR_VISIBLE_DEVICES ray start --address="$RAY_ADDRESS" --num-cpus="$SLURM_CPUS_PER_TASK" \
         --num-gpus=1 --block &
     sleep 5
 done
