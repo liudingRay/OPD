@@ -28,7 +28,9 @@ if [ -z "$SLURM_JOB_ID" ]; then
     echo "=========================================="
 fi
 
-ray stop --force
+if [ "${RAY_CLUSTER_ALREADY_STARTED:-0}" != "1" ]; then
+    ray stop --force
+fi
 unset ROCR_VISIBLE_DEVICES
 export RAY_memory_usage_threshold=0.99
 export CUDA_LAUNCH_BLOCKING=${CUDA_LAUNCH_BLOCKING:-1}
@@ -182,8 +184,12 @@ mkdir -p "$TRITON_CACHE_DIR" \
          "$OUTLINES_CACHE_DIR" \
          "$OPD_CACHE_ROOT/verl-rlhf"
 
-ray start --head
-sleep 5
+if [ "${RAY_CLUSTER_ALREADY_STARTED:-0}" != "1" ]; then
+    ray start --head
+    sleep 5
+else
+    echo "Using externally started Ray cluster at ${RAY_ADDRESS:-unknown}."
+fi
 
 
 python3 -m verl.trainer.main_ppo \
