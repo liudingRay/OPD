@@ -1,6 +1,6 @@
 #!/bin/bash
 # Two-node OPD reproduction run.  Each node receives four A100 GPUs, 32 CPUs,
-# and 500G RAM.  A Ray head is started on the first node and a Ray worker on the
+# and 480G RAM.  A Ray head is started on the first node and a Ray worker on the
 # second node before the OPD driver runs on the head.
 #SBATCH --job-name=opd-pilot-2node
 #SBATCH --account=EUHPC_D29_082
@@ -10,7 +10,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:a100:4
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=500G
+#SBATCH --mem=480G
 #SBATCH --time=24:00:00
 #SBATCH --output=/leonardo_work/EUHPC_D29_082/OPD-experiment/OPD/logs/%x-%j.out
 #SBATCH --error=/leonardo_work/EUHPC_D29_082/OPD-experiment/OPD/logs/%x-%j.err
