@@ -1,6 +1,6 @@
 #!/bin/bash
-# Two-node OPD training pilot.  Each node receives one A100, eight CPUs, and
-# 64G RAM.  A Ray head is started on the first node and a Ray worker on the
+# Two-node OPD reproduction run.  Each node receives four A100 GPUs, 32 CPUs,
+# and 500G RAM.  A Ray head is started on the first node and a Ray worker on the
 # second node before the OPD driver runs on the head.
 #SBATCH --job-name=opd-pilot-2node
 #SBATCH --account=EUHPC_D29_082
@@ -8,10 +8,10 @@
 #SBATCH --nodes=2
 #SBATCH --ntasks=2
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:a100:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
-#SBATCH --time=04:00:00
+#SBATCH --gres=gpu:a100:4
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=500G
+#SBATCH --time=24:00:00
 #SBATCH --output=/leonardo_work/EUHPC_D29_082/OPD-experiment/OPD/logs/%x-%j.out
 #SBATCH --error=/leonardo_work/EUHPC_D29_082/OPD-experiment/OPD/logs/%x-%j.err
 
@@ -69,14 +69,14 @@ echo "Ray head: ${RAY_ADDRESS}"
 
 srun --overlap --nodes=1 --ntasks=1 -w "$HEAD_NODE" \
     env -u ROCR_VISIBLE_DEVICES ray start --head --node-ip-address="$HEAD_IP" --port="$RAY_PORT" \
-    --num-cpus="$SLURM_CPUS_PER_TASK" --num-gpus=1 --block &
+    --num-cpus="$SLURM_CPUS_PER_TASK" --num-gpus=4 --block &
 sleep 10
 
 for ((NODE_INDEX = 1; NODE_INDEX < ${#NODES[@]}; NODE_INDEX++)); do
     WORKER_NODE=${NODES[$NODE_INDEX]}
     srun --overlap --nodes=1 --ntasks=1 -w "$WORKER_NODE" \
         env -u ROCR_VISIBLE_DEVICES ray start --address="$RAY_ADDRESS" --num-cpus="$SLURM_CPUS_PER_TASK" \
-        --num-gpus=1 --block &
+        --num-gpus=4 --block &
     sleep 5
 done
 
@@ -86,4 +86,4 @@ done
 # Ray connection immediately afterwards.
 srun --overlap --nodes=1 --ntasks=1 -w "$HEAD_NODE" ray status --address="$RAY_ADDRESS" \
     || echo "Warning: ray status failed; continuing to the driver connection test."
-srun --overlap --nodes=1 --ntasks=1 -w "$HEAD_NODE" bash opd_pilot_2node_1xa100.sh
+srun --overlap --nodes=1 --ntasks=1 -w "$HEAD_NODE" bash opd_pilot_2node_4xa100.sh
