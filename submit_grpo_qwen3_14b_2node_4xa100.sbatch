@@ -2,7 +2,7 @@
 # Two-node Qwen3-14B GRPO pilot. Each node receives four A100 GPUs, 32 CPUs,
 # and 480G RAM. A Ray head runs on the first node and a worker on the second.
 #SBATCH --job-name=grpo-qwen3-14b
-#SBATCH --account=EUHPC_D29_082
+#SBATCH --account=EUHPC_D33_157
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=2
 #SBATCH --ntasks=2
