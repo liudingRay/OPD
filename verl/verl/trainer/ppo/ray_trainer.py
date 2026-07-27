@@ -322,6 +322,10 @@ class RayPPOTrainer:
         self.config = config
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
+        # A Slurm batch-shell trap can create this shared-file marker before
+        # its wall-time limit. Ray workers do not receive that shell signal,
+        # so poll the marker at a safe training-step boundary instead.
+        self.timeout_save_marker = os.environ.get("OPD_TIMEOUT_SAVE_MARKER")
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
@@ -2277,6 +2281,11 @@ class RayPPOTrainer:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
 
+                # A shared marker requests a checkpoint before a scheduler wall-time limit.
+                save_before_timeout = bool(
+                    self.timeout_save_marker and os.path.exists(self.timeout_save_marker)
+                )
+
                 # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                 esi_close_to_expiration = should_save_ckpt_esi(
                     max_steps_duration=self.max_steps_duration,
@@ -2289,11 +2298,14 @@ class RayPPOTrainer:
                 # 2. It's the last training step.
                 # 3. The current step number is a multiple of the save frequency.
                 # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
-                if self.config.trainer.save_freq > 0 and (
+                periodic_or_esi_save = self.config.trainer.save_freq > 0 and (
                     is_last_step or self.global_steps % self.config.trainer.save_freq == 0 or esi_close_to_expiration
-                ):
+                )
+                if periodic_or_esi_save or save_before_timeout:
                     if esi_close_to_expiration:
                         print("Force saving checkpoint: ESI instance expiration approaching.")
+                    if save_before_timeout:
+                        print(f"Force saving checkpoint: wall-time marker found at {self.timeout_save_marker}.")
                     with marked_timer("save_checkpoint", timing_raw, color="green"):
                         self._save_checkpoint()
 
@@ -2347,7 +2359,9 @@ class RayPPOTrainer:
                         tag=f"post_update_step{self.global_steps}", sub_dir=f"step{self.global_steps}"
                     )
 
-                if is_last_step:
+                if is_last_step or save_before_timeout:
+                    if save_before_timeout and not is_last_step:
+                        print("Final wall-time checkpoint saved; stopping before the Slurm time limit.")
                     print(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return

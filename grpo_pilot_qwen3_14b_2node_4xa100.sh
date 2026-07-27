@@ -33,6 +33,18 @@ export TRAINER_TEST_FREQ=-1
 export TRAINER_TOTAL_EPOCHS=1
 export TRAINER_LOGGER='["console","wandb"]'
 
+# Continue the interrupted 24-hour pilot from its complete GRPO checkpoint.
+# Keeping the original run directory makes resume_mode=auto load global_step_440
+# now and the latest checkpoint automatically on later resubmissions.
+export CKPT_PATH=checkpoint/grpo_DAPO-Math-17k-qwen3-14b-grpo-2node-4xa100_Qwen3-14B-Base_Qwen3-14B-Base_7168-T_1.0-Tch_1.0-n_4-mbs_8-topk_0-topk_strategy_union-rw_student_p-2026-07-26_11-30-16
+export TRAINER_RESUME_MODE=auto
+export EXPERIMENT_NAME="${CKPT_PATH##*/}"
+
+# Reuse the existing W&B run. The new offline folder will have this same ID
+# and must be synced with `wandb sync --append` after the job finishes.
+export WANDB_RUN_ID=7gahb82o
+export WANDB_RESUME=allow
+
 export CUDA_LAUNCH_BLOCKING=0
 export TORCH_DISTRIBUTED_DEBUG=OFF
 

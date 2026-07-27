@@ -11,6 +11,10 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=480G
 #SBATCH --time=24:00:00
+# Signal only the batch shell 20 minutes before the time limit. The trap
+# below creates a shared marker that the Ray trainer sees at its next safe
+# step boundary, writes a checkpoint, then exits cleanly.
+#SBATCH --signal=B:USR1@1200
 #SBATCH --output=/leonardo_work/EUHPC_D29_082/OPD-experiment/OPD/logs/%x-%j.out
 #SBATCH --error=/leonardo_work/EUHPC_D29_082/OPD-experiment/OPD/logs/%x-%j.err
 
@@ -34,11 +38,19 @@ export HF_HOME="$OPD_CACHE_ROOT/huggingface"
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
 export HF_HUB_CACHE="$HF_HOME/hub"
 export OUTLINES_CACHE_DIR="$OPD_CACHE_ROOT/outlines/${SLURM_JOB_ID}"
+export OPD_TIMEOUT_SAVE_MARKER="$PROJECT_DIR/logs/save-before-time-limit-${SLURM_JOB_ID}"
 unset ROCR_VISIBLE_DEVICES
 
 mkdir -p "$PROJECT_DIR/logs" "$WANDB_DIR" "$TRITON_CACHE_DIR" \
     "$TORCHINDUCTOR_CACHE_DIR" "$HF_DATASETS_CACHE" "$HF_HUB_CACHE" \
     "$OUTLINES_CACHE_DIR" "$OPD_CACHE_ROOT/verl-rlhf"
+rm -f "$OPD_TIMEOUT_SAVE_MARKER"
+
+save_before_time_limit() {
+    echo "$(date): received the Slurm pre-time-limit warning; requesting a final checkpoint."
+    touch "$OPD_TIMEOUT_SAVE_MARKER"
+}
+trap save_before_time_limit USR1
 
 mapfile -t NODES < <(scontrol show hostnames "$SLURM_JOB_NODELIST")
 HEAD_NODE=${NODES[0]}
