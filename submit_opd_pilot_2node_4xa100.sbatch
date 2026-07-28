@@ -3,7 +3,7 @@
 # and 480G RAM. A Ray head is started on the first node and a Ray worker on the
 # second node before the OPD driver runs on the head.
 #SBATCH --job-name=opd-progressive-2node
-#SBATCH --account=EUHPC_D29_082
+#SBATCH --account=EUHPC_D33_157
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=2
 #SBATCH --ntasks=2
