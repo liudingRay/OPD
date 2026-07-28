@@ -1,8 +1,8 @@
 #!/bin/bash
-# Two-node OPD reproduction run.  Each node receives four A100 GPUs, 32 CPUs,
-# and 480G RAM.  A Ray head is started on the first node and a Ray worker on the
+# Two-node progressive OPD run. Each node receives four A100 GPUs, 32 CPUs,
+# and 480G RAM. A Ray head is started on the first node and a Ray worker on the
 # second node before the OPD driver runs on the head.
-#SBATCH --job-name=opd-pilot-2node
+#SBATCH --job-name=opd-progressive-2node
 #SBATCH --account=EUHPC_D29_082
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=2
@@ -36,6 +36,20 @@ export HF_DATASETS_CACHE="$HF_HOME/datasets"
 export HF_HUB_CACHE="$HF_HOME/hub"
 export OUTLINES_CACHE_DIR="$OPD_CACHE_ROOT/outlines/${SLURM_JOB_ID}"
 unset ROCR_VISIBLE_DEVICES
+
+# Stage 2: initialize the student from the completed 1.5B OPD checkpoint and
+# use Qwen3-4B-Base as the frozen teacher for one additional DAPO-Math-17k
+# epoch. The actor base path must remain the original DeepSeek 1.5B model:
+# verl restores the trained actor weights from TRAINER_RESUME_FROM_PATH.
+export ACTOR_MODEL_PATH=model/DeepSeek-R1-Distill-Qwen-1.5B
+export ACTOR_MODEL_NAME=DeepSeek-R1-Distill-Qwen-1.5B-OPD-step279
+export REWARD_MODEL_PATH=model/Qwen3-4B-Base
+export REWARD_MODEL_NAME=Qwen3-4B-Base
+export TRAINER_RESUME_MODE=resume_path
+export TRAINER_RESUME_FROM_PATH=checkpoint/token_reward_direct_DAPO-Math-17k-repro-2node-4xa100_DeepSeek-R1-Distill-Qwen-1.5B_JustRL-DeepSeek-1.5B_7168-T_1.0-Tch_1.0-n_4-mbs_64-topk_16-topk_strategy_only_stu-rw_student_p-2026-07-24_06-31-18/global_step_279
+export TRAINER_TOTAL_EPOCHS=2
+export EXPERIMENT_NAME="token_reward_direct_DAPO-Math-17k-progressive-2node-4xa100_DeepSeek-R1-Distill-Qwen-1.5B-OPD-step279_Qwen3-4B-Base_7168-T_1.0-Tch_1.0-n_4-mbs_64-topk_16-topk_strategy_only_stu-rw_student_p-$(date +%Y-%m-%d_%H-%M-%S)"
+export CKPT_PATH="checkpoint/${EXPERIMENT_NAME}"
 
 mkdir -p "$PROJECT_DIR/logs" "$WANDB_DIR" "$TRITON_CACHE_DIR" \
     "$TORCHINDUCTOR_CACHE_DIR" "$HF_DATASETS_CACHE" "$HF_HUB_CACHE" \
