@@ -33,7 +33,7 @@ Here is your task. Simply reply with either CORRECT, INCORRECT, or INVALID. Don'
 Judging the correctness of the candidate's answer:
 """
 
-NAME     = "Qwen3-4B-Non-Thinking-RL-Math" 
+NAME = "Qwen3-4B-Non-Thinking-RL-Math"
 EVAL_DIR = Path(f"justrl_eval_outputs/{NAME}")
 OUTPUT_FILE = EVAL_DIR / "grading_results.json"
 MODEL_NAME = "../../model/CompassVerifier-3B"
@@ -42,7 +42,7 @@ MODEL_NAME = "../../model/CompassVerifier-3B"
 vllm_model = None
 model_tokenizer = None
 sampling_params = None
-length_tokenizer = AutoTokenizer.from_pretrained("../../model/Qwen3-1.7B", local_files_only=True)
+length_tokenizer = None
 
 def get_len(seq):
     if length_tokenizer:
@@ -71,6 +71,9 @@ def process_jsonl_file(file_name):
             gt = data["answer"]
             response = data["response"]
             results[id]["gt"] = gt
+            # New generation outputs retain the original benchmark question so
+            # the optional LLM verifier receives the complete comparison task.
+            results[id]["question"] = data.get("question", data.get("prompt", ""))
             results[id]["responses"].append(response)
     return results
 
@@ -216,18 +219,54 @@ def main():
         action="store_true", 
         help="If set, enable the LLM-based verifier. By default, only rule-based grading is used."
     )
+    parser.add_argument(
+        "--eval-dir",
+        type=Path,
+        default=EVAL_DIR,
+        help="Directory containing JSONL generation outputs (default preserves the original behavior).",
+    )
+    parser.add_argument(
+        "--output-file",
+        type=Path,
+        default=None,
+        help="Where to write grading JSON (default: <eval-dir>/grading_results.json).",
+    )
+    parser.add_argument(
+        "--length-tokenizer",
+        default="../../model/Qwen3-1.7B",
+        help="Local tokenizer used only for the output-length statistic.",
+    )
+    parser.add_argument(
+        "--verifier-model",
+        default=MODEL_NAME,
+        help="Local CompassVerifier path when --enable_model_verifier is used.",
+    )
+    parser.add_argument(
+        "--verifier-tensor-parallel-size",
+        type=int,
+        default=8,
+        help="Tensor parallel degree for the optional model verifier.",
+    )
     args = parser.parse_args()
 
     global vllm_model, model_tokenizer, sampling_params
+    global length_tokenizer
+    eval_dir = args.eval_dir
+    output_file = args.output_file or eval_dir / "grading_results.json"
+    try:
+        length_tokenizer = AutoTokenizer.from_pretrained(args.length_tokenizer, local_files_only=True)
+    except Exception as exc:
+        print(f"Warning: could not load length tokenizer {args.length_tokenizer}: {exc}")
+        print("Falling back to character counts for avg_output_length.")
     
     # Only load VLLM if we are enabling the verifier
     if args.enable_model_verifier:
         print("Loading CompassVerifier model...")
         from vllm import LLM, SamplingParams
-        model_tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+        model_tokenizer = AutoTokenizer.from_pretrained(args.verifier_model)
         vllm_model = LLM(
-            model=MODEL_NAME,
-            tensor_parallel_size=8
+            model=args.verifier_model,
+            tensor_parallel_size=args.verifier_tensor_parallel_size,
         )
         sampling_params = SamplingParams(
             temperature=0.0,
@@ -237,11 +276,11 @@ def main():
         print("Model verifier disabled by default. Running in rule-based only mode.")
 
     all_results = []
-    if not EVAL_DIR.exists():
-        print(f"Directory {EVAL_DIR} does not exist.")
+    if not eval_dir.exists():
+        print(f"Directory {eval_dir} does not exist.")
         return
 
-    for file_path in EVAL_DIR.glob("*.jsonl"):
+    for file_path in eval_dir.glob("*.jsonl"):
         print(f"Processing file: {file_path}")
         # Pass the flag to the grading function
         file_result = grade_file(file_path, use_model_verifier=args.enable_model_verifier)
@@ -249,9 +288,9 @@ def main():
             all_results.append(file_result)
 
     # Save results to JSON
-    with OUTPUT_FILE.open("w", encoding="utf-8") as f:
+    with output_file.open("w", encoding="utf-8") as f:
         json.dump(all_results, f, indent=4)
-    print(f"Grading results saved to {OUTPUT_FILE}")
+    print(f"Grading results saved to {output_file}")
 
 if __name__ == "__main__":
     main()
