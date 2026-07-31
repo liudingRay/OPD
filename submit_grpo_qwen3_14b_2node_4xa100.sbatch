@@ -15,14 +15,14 @@
 # below creates a shared marker that the Ray trainer sees at its next safe
 # step boundary, writes a checkpoint, then exits cleanly.
 #SBATCH --signal=B:USR1@1200
-#SBATCH --output=/leonardo_work/EUHPC_D29_082/OPD-experiment/OPD/logs/%x-%j.out
-#SBATCH --error=/leonardo_work/EUHPC_D29_082/OPD-experiment/OPD/logs/%x-%j.err
+#SBATCH --output=/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD/logs/%x-%j.out
+#SBATCH --error=/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD/logs/%x-%j.err
 
 set -eo pipefail
 
-PROJECT_DIR=/leonardo_work/EUHPC_D29_082/OPD-experiment/OPD
+PROJECT_DIR=/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD
 CONDA_BASE=/leonardo/home/userexternal/jbi00000/miniconda3
-OPD_CACHE_ROOT=/leonardo_work/EUHPC_D29_082/OPD-experiment/.cache/opd
+OPD_CACHE_ROOT=/leonardo_work/EUHPC_D33_157/OPD-experiment/.cache/opd
 WANDB_DIR="$OPD_CACHE_ROOT/wandb"
 
 source "$CONDA_BASE/etc/profile.d/conda.sh"
