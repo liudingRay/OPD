@@ -1,5 +1,5 @@
 #!/bin/bash
-# Evaluate four local baselines concurrently: one vLLM process per A100 GPU.
+# Evaluate the 1.5B and 4B local baselines serially: one vLLM process at a time on one A100 GPU.
 # Submit from the inner OPD checkout with:
 #   sbatch submit_eval_baselines_4xa100.sbatch
 # Override the result location or rerun existing outputs, for example:
@@ -9,9 +9,9 @@
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:a100:4
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=480G
+#SBATCH --gres=gpu:a100:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=120G
 #SBATCH --time=24:00:00
 #SBATCH --output=/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD/logs/%x-%j.out
 #SBATCH --error=/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD/logs/%x-%j.err
@@ -51,16 +51,20 @@ GENERATOR_ARGS=(
     --model-root "$PROJECT_DIR/model"
     --data-dir "$PROJECT_DIR/scripts/val/data"
     --output-root "$EVAL_OUTPUT_ROOT"
-    --gpu-ids 0,1,2,3
+    --gpu-ids 0
+    --serial
+    --model "DeepSeek-R1-Distill-Qwen-1.5B=$PROJECT_DIR/model/DeepSeek-R1-Distill-Qwen-1.5B"
+    --model "JustRL-DeepSeek-1.5B=$PROJECT_DIR/model/JustRL-DeepSeek-1.5B"
+    --model "Qwen3-4B-Base=$PROJECT_DIR/model/Qwen3-4B-Base"
 )
 if [[ "${EVAL_OVERWRITE:-0}" == "1" ]]; then
     GENERATOR_ARGS+=(--overwrite)
 fi
 python eval_baselines.py "${GENERATOR_ARGS[@]}"
 
-# Rule-based grading needs no additional GPU allocation.  All four outputs use
+# Rule-based grading needs no additional GPU allocation.  All selected outputs use
 # the Qwen3-4B tokenizer solely for a comparable output-length diagnostic.
-for MODEL_NAME in DeepSeek-R1-Distill-Qwen-1.5B JustRL-DeepSeek-1.5B Qwen3-4B-Base Qwen3-8B-Base; do
+for MODEL_NAME in DeepSeek-R1-Distill-Qwen-1.5B JustRL-DeepSeek-1.5B Qwen3-4B-Base; do
     python grade.py \
         --eval-dir "$EVAL_OUTPUT_ROOT/$MODEL_NAME" \
         --length-tokenizer "$PROJECT_DIR/model/Qwen3-4B-Base"

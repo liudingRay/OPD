@@ -3,8 +3,8 @@
 
 Each model is assigned to one GPU.  The default registry evaluates the four
 baselines in ``<project>/model`` used by the Leonardo batch submission script.
-Unlike ``gen_vllm.py``, this entry point has no hard-coded eight-GPU assumption
-and keeps every model's outputs in a separate directory.
+It can either run the models concurrently on separate GPUs or serially on one
+GPU, while keeping every model's outputs in a separate directory.
 """
 
 from __future__ import annotations
@@ -197,6 +197,11 @@ def parse_args() -> argparse.Namespace:
         help="Override the default model registry. May be supplied multiple times.",
     )
     parser.add_argument("--gpu-ids", default="0,1,2,3", help="Comma-separated GPU IDs, one per model.")
+    parser.add_argument(
+        "--serial",
+        action="store_true",
+        help="Evaluate all models sequentially on the single GPU specified by --gpu-ids.",
+    )
     parser.add_argument("--tasks", nargs="+", choices=DEFAULT_TASKS, default=list(DEFAULT_TASKS))
     parser.add_argument("--num-samples", type=int, default=16)
     parser.add_argument("--temperature", type=float, default=0.7)
@@ -213,8 +218,14 @@ def main() -> None:
         raise ValueError("--num-samples must be positive.")
     gpu_ids = [gpu_id.strip() for gpu_id in args.gpu_ids.split(",") if gpu_id.strip()]
     model_specs = args.model or [(label, str(args.model_root / label)) for label in DEFAULT_MODELS]
-    if len(model_specs) != len(gpu_ids):
+    if args.serial:
+        if len(gpu_ids) != 1:
+            raise ValueError("--serial requires exactly one GPU ID.")
+        assigned_gpu_ids = gpu_ids * len(model_specs)
+    elif len(model_specs) != len(gpu_ids):
         raise ValueError(f"Received {len(model_specs)} model(s) but {len(gpu_ids)} GPU ID(s); they must match.")
+    else:
+        assigned_gpu_ids = gpu_ids
     labels = [label for label, _ in model_specs]
     if len(set(labels)) != len(labels):
         raise ValueError("Model labels must be unique because they define output directories.")
@@ -234,7 +245,7 @@ def main() -> None:
             enable_thinking=args.enable_thinking,
             overwrite=args.overwrite,
         )
-        for (label, model_path), gpu_id in zip(model_specs, gpu_ids, strict=True)
+        for (label, model_path), gpu_id in zip(model_specs, assigned_gpu_ids, strict=True)
     ]
     for config in configs:
         validate_config(config)
@@ -245,16 +256,29 @@ def main() -> None:
         json.dump([asdict(config) for config in configs], handle, indent=2)
 
     context = multiprocessing.get_context("spawn")
-    with concurrent.futures.ProcessPoolExecutor(max_workers=len(configs), mp_context=context) as executor:
-        futures = {executor.submit(run_model, config): config for config in configs}
-        for future in concurrent.futures.as_completed(futures):
-            config = futures[future]
-            try:
-                print(f"Completed: {future.result()}", flush=True)
-            except Exception as exc:
-                print(f"FAILED: {config.label} on GPU {config.gpu_id}: {exc}", flush=True)
-                traceback.print_exc()
-                raise
+    if args.serial:
+        for config in configs:
+            # Use a fresh process for each model so vLLM/CUDA state from the
+            # previous model cannot remain attached to the allocated GPU.
+            with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=context) as executor:
+                future = executor.submit(run_model, config)
+                try:
+                    print(f"Completed: {future.result()}", flush=True)
+                except Exception as exc:
+                    print(f"FAILED: {config.label} on GPU {config.gpu_id}: {exc}", flush=True)
+                    traceback.print_exc()
+                    raise
+    else:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=len(configs), mp_context=context) as executor:
+            futures = {executor.submit(run_model, config): config for config in configs}
+            for future in concurrent.futures.as_completed(futures):
+                config = futures[future]
+                try:
+                    print(f"Completed: {future.result()}", flush=True)
+                except Exception as exc:
+                    print(f"FAILED: {config.label} on GPU {config.gpu_id}: {exc}", flush=True)
+                    traceback.print_exc()
+                    raise
 
 
 if __name__ == "__main__":
