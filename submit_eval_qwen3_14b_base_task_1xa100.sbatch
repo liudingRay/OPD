@@ -1,20 +1,21 @@
 #!/bin/bash
-# Evaluate one Qwen3-14B-Base benchmark with avg@16 on one A100 GPU.
+# Evaluate one Qwen3-14B-Base benchmark with avg@16 on two A100 GPUs.
 # Submit each benchmark as an independent job:
 #   sbatch --export=ALL,TASK=AIME24 submit_eval_qwen3_14b_base_task_1xa100.sbatch
 #   sbatch --export=ALL,TASK=AIME25 submit_eval_qwen3_14b_base_task_1xa100.sbatch
 #   sbatch --export=ALL,TASK=AMC23  submit_eval_qwen3_14b_base_task_1xa100.sbatch
 #
-# This script generates only its selected JSONL. After all three jobs complete,
+# Each GPU generates eight independent samples per problem, then the two shards
+# are merged into the standard 16-sample JSONL. After all three jobs complete,
 # run the grading commands printed below to score and summarize the full set.
 #SBATCH --job-name=eval-qwen3-14b-base
 #SBATCH --account=EUHPC_D33_157
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:a100:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=120G
+#SBATCH --gres=gpu:a100:2
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=240G
 #SBATCH --time=24:00:00
 #SBATCH --output=/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD/logs/%x-%j.out
 #SBATCH --error=/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD/logs/%x-%j.err
@@ -60,21 +61,47 @@ echo "Results: $EVAL_OUTPUT_ROOT"
 nvidia-smi
 
 cd "$PROJECT_DIR/scripts/val/eval"
-GENERATOR_ARGS=(
-    --model-root "$PROJECT_DIR/model"
-    --data-dir "$PROJECT_DIR/scripts/val/data"
-    --output-root "$EVAL_OUTPUT_ROOT"
-    --gpu-ids 0
-    --serial
-    --tasks "$TASK"
-    --model "Qwen3-14B-Base=$PROJECT_DIR/model/Qwen3-14B-Base"
-)
-if [[ "${EVAL_OVERWRITE:-0}" == "1" ]]; then
-    GENERATOR_ARGS+=(--overwrite)
+TASK_LOWER=$(printf '%s' "$TASK" | tr '[:upper:]' '[:lower:]')
+MODEL_NAME=Qwen3-14B-Base
+MODEL_OUTPUT_DIR="$EVAL_OUTPUT_ROOT/$MODEL_NAME"
+FINAL_OUTPUT="$MODEL_OUTPUT_DIR/${TASK_LOWER}_t0.7_p0.95_n16-MNT31744.jsonl"
+WORKER_ROOT="$EVAL_OUTPUT_ROOT/.workers/$TASK"
+WORKER_ZERO_ROOT="$WORKER_ROOT/gpu0"
+WORKER_ONE_ROOT="$WORKER_ROOT/gpu1"
+WORKER_ZERO_OUTPUT="$WORKER_ZERO_ROOT/$MODEL_NAME/${TASK_LOWER}_t0.7_p0.95_n8-MNT31744.jsonl"
+WORKER_ONE_OUTPUT="$WORKER_ONE_ROOT/$MODEL_NAME/${TASK_LOWER}_t0.7_p0.95_n8-MNT31744.jsonl"
+
+if [[ -f "$FINAL_OUTPUT" && "${EVAL_OVERWRITE:-0}" != "1" ]]; then
+    echo "Reusing completed result: $FINAL_OUTPUT"
+else
+    WORKER_ARGS=(
+        --model-root "$PROJECT_DIR/model"
+        --data-dir "$PROJECT_DIR/scripts/val/data"
+        --serial
+        --tasks "$TASK"
+        --num-samples 8
+        --model "$MODEL_NAME=$PROJECT_DIR/model/$MODEL_NAME"
+    )
+    if [[ "${EVAL_OVERWRITE:-0}" == "1" ]]; then
+        WORKER_ARGS+=(--overwrite)
+    fi
+
+    python eval_baselines.py --output-root "$WORKER_ZERO_ROOT" --gpu-ids 0 "${WORKER_ARGS[@]}" &
+    WORKER_ZERO_PID=$!
+    python eval_baselines.py --output-root "$WORKER_ONE_ROOT" --gpu-ids 1 "${WORKER_ARGS[@]}" &
+    WORKER_ONE_PID=$!
+    wait "$WORKER_ZERO_PID"
+    wait "$WORKER_ONE_PID"
+
+    python merge_eval_rollouts.py \
+        --input "$WORKER_ZERO_OUTPUT" \
+        --input "$WORKER_ONE_OUTPUT" \
+        --output "$FINAL_OUTPUT" \
+        --expected-total-samples 16
 fi
-python eval_baselines.py "${GENERATOR_ARGS[@]}"
 
 echo "Generation complete for $TASK. After all three task jobs finish, run:"
 echo "  cd $PROJECT_DIR/scripts/val/eval"
-echo "  python grade.py --eval-dir $EVAL_OUTPUT_ROOT/Qwen3-14B-Base --length-tokenizer $PROJECT_DIR/model/Qwen3-14B-Base"
+printf '  python grade.py --eval-dir %s/Qwen3-14B-Base \\\n' "$EVAL_OUTPUT_ROOT"
+printf '    --length-tokenizer %s/model/Qwen3-14B-Base\n' "$PROJECT_DIR"
 echo "  python summarize_baseline_results.py --output-root $EVAL_OUTPUT_ROOT"
