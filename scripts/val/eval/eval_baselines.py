@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Run the OPD/JustRL math evaluation protocol for several local baselines.
 
-Each model is assigned to one GPU.  The default registry evaluates the four
-baselines in ``<project>/model`` used by the Leonardo batch submission script.
+Each model is assigned to one GPU. The default registry evaluates the Qwen3
+1.7B-Base and 8B-Base models in ``<project>/model`` used by the Leonardo batch
+submission script.
 It can either run the models concurrently on separate GPUs or serially on one
 GPU, while keeping every model's outputs in a separate directory.
 """
@@ -25,9 +26,7 @@ from vllm import LLM, SamplingParams
 
 PROMPT_TEMPLATE = "{problem} Please reason step by step, and put your final answer within \\boxed{{}}."
 DEFAULT_MODELS = (
-    "DeepSeek-R1-Distill-Qwen-1.5B",
-    "JustRL-DeepSeek-1.5B",
-    "Qwen3-4B-Base",
+    "Qwen3-1.7B-Base",
     "Qwen3-8B-Base",
 )
 DEFAULT_TASKS = ("AIME24", "AIME25", "AMC23")
@@ -196,7 +195,7 @@ def parse_args() -> argparse.Namespace:
         metavar="LABEL=PATH",
         help="Override the default model registry. May be supplied multiple times.",
     )
-    parser.add_argument("--gpu-ids", default="0,1,2,3", help="Comma-separated GPU IDs, one per model.")
+    parser.add_argument("--gpu-ids", default="0,1", help="Comma-separated GPU IDs, one per model.")
     parser.add_argument(
         "--serial",
         action="store_true",

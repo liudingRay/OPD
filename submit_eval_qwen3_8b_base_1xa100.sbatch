@@ -1,11 +1,8 @@
 #!/bin/bash
-# Evaluate Qwen3-1.7B-Base and Qwen3-8B-Base serially: one vLLM process at a
-# time on one A100 GPU.
+# Evaluate Qwen3-8B-Base on AIME24, AIME25, and AMC23 with avg@16.
 # Submit from the inner OPD checkout with:
-#   sbatch submit_eval_baselines_4xa100.sbatch
-# Override the result location or rerun existing outputs, for example:
-#   EVAL_OUTPUT_ROOT=/path/to/results EVAL_OVERWRITE=1 sbatch submit_eval_baselines_4xa100.sbatch
-#SBATCH --job-name=eval-qwen3-base
+#   sbatch submit_eval_qwen3_8b_base_1xa100.sbatch
+#SBATCH --job-name=eval-qwen3-8b-base
 #SBATCH --account=EUHPC_D33_157
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
@@ -43,7 +40,6 @@ mkdir -p "$PROJECT_DIR/logs" "$EVAL_OUTPUT_ROOT" "$TRITON_CACHE_DIR" \
 
 echo "Job ID: ${SLURM_JOB_ID}"
 echo "Node: $(hostname)"
-echo "Allocated GPUs: ${CUDA_VISIBLE_DEVICES:-not-set}"
 echo "Results: $EVAL_OUTPUT_ROOT"
 nvidia-smi
 
@@ -54,7 +50,6 @@ GENERATOR_ARGS=(
     --output-root "$EVAL_OUTPUT_ROOT"
     --gpu-ids 0
     --serial
-    --model "Qwen3-1.7B-Base=$PROJECT_DIR/model/Qwen3-1.7B-Base"
     --model "Qwen3-8B-Base=$PROJECT_DIR/model/Qwen3-8B-Base"
 )
 if [[ "${EVAL_OVERWRITE:-0}" == "1" ]]; then
@@ -62,12 +57,8 @@ if [[ "${EVAL_OVERWRITE:-0}" == "1" ]]; then
 fi
 python eval_baselines.py "${GENERATOR_ARGS[@]}"
 
-# Rule-based grading needs no additional GPU allocation. Both selected outputs
-# use the Qwen3-1.7B tokenizer solely for a comparable output-length diagnostic.
-for MODEL_NAME in Qwen3-1.7B-Base Qwen3-8B-Base; do
-    python grade.py \
-        --eval-dir "$EVAL_OUTPUT_ROOT/$MODEL_NAME" \
-        --length-tokenizer "$PROJECT_DIR/model/Qwen3-1.7B-Base"
-done
+python grade.py \
+    --eval-dir "$EVAL_OUTPUT_ROOT/Qwen3-8B-Base" \
+    --length-tokenizer "$PROJECT_DIR/model/Qwen3-1.7B-Base"
 
 python summarize_baseline_results.py --output-root "$EVAL_OUTPUT_ROOT"
