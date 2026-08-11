@@ -9,7 +9,9 @@ export TRAIN_DATASET=datasets/dapo-math-17k.parquet
 export TRAIN_DATASET_NAME=DAPO-Math-17k-qwen3-14b-grpo-2node-4xa100
 export TRAIN_MAX_SAMPLES=-1
 
-export ACTOR_MODEL_PATH=model/Qwen3-14B-Base
+# Start a new GRPO run from the instruction-tuned Qwen3-14B checkpoint.
+# Do not point this at an FSDP checkpoint created from Qwen3-14B-Base.
+export ACTOR_MODEL_PATH=model/Qwen3-14B
 export MODEL_DTYPE=bfloat16
 export MAX_RESP_LENGTH=7168
 export MAX_VAL_RESP_LENGTH=7168
@@ -33,17 +35,15 @@ export TRAINER_TEST_FREQ=-1
 export TRAINER_TOTAL_EPOCHS=1
 export TRAINER_LOGGER='["console","wandb"]'
 
-# Continue the interrupted 24-hour pilot from its complete GRPO checkpoint.
-# Keeping the original run directory makes resume_mode=auto load global_step_440
-# now and the latest checkpoint automatically on later resubmissions.
-export CKPT_PATH=checkpoint/grpo_DAPO-Math-17k-qwen3-14b-grpo-2node-4xa100_Qwen3-14B-Base_Qwen3-14B-Base_7168-T_1.0-Tch_1.0-n_4-mbs_8-topk_0-topk_strategy_union-rw_student_p-2026-07-26_11-30-16
+# This root is separate from the prior Qwen3-14B-Base run. `auto` starts
+# fresh when no checkpoint exists, then resumes only this Qwen3-14B run.
+export CKPT_PATH=${CKPT_PATH:-checkpoint/grpo_DAPO-Math-17k-qwen3-14b-grpo-2node-4xa100_Qwen3-14B_Qwen3-14B_7168-T_1.0-Tch_1.0-n_4-mbs_8-topk_0-topk_strategy_union-rw_student_p}
 export TRAINER_RESUME_MODE=auto
 export EXPERIMENT_NAME="${CKPT_PATH##*/}"
 
-# Reuse the existing W&B run. The new offline folder will have this same ID
-# and must be synced with `wandb sync --append` after the job finishes.
-export WANDB_RUN_ID=7gahb82o
-export WANDB_RESUME=allow
+# Do not attach this new base model to the previous Base-model W&B curve.
+unset WANDB_RUN_ID
+unset WANDB_RESUME
 
 export CUDA_LAUNCH_BLOCKING=0
 export TORCH_DISTRIBUTED_DEBUG=OFF
