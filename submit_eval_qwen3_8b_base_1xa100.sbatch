@@ -1,8 +1,8 @@
 #!/bin/bash
-# Evaluate Qwen3-8B-Base on AIME24, AIME25, and AMC23 with avg@16.
+# Evaluate Qwen3-8B on AIME24, AIME25, and AMC23 with avg@16.
 # Submit from the inner OPD checkout with:
 #   sbatch submit_eval_qwen3_8b_base_1xa100.sbatch
-#SBATCH --job-name=eval-qwen3-8b-base
+#SBATCH --job-name=eval-qwen3-8b
 #SBATCH --account=EUHPC_D33_157
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
@@ -19,7 +19,7 @@ set -eo pipefail
 PROJECT_DIR=${PROJECT_DIR:-/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD}
 CONDA_BASE=${CONDA_BASE:-/leonardo/home/userexternal/jbi00000/miniconda3}
 OPD_CACHE_ROOT=${OPD_CACHE_ROOT:-/leonardo_work/EUHPC_D33_157/OPD-experiment/.cache/opd}
-EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$PROJECT_DIR/scripts/val/eval/justrl_eval_outputs/qwen3-base-1p7b-8b-no-thinking-n16}
+EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$PROJECT_DIR/scripts/val/eval/justrl_eval_outputs/qwen3-8b-no-thinking-n16}
 CONDA_ENV=${CONDA_ENV:-$WORK/$USER/conda_envs/opd-cu118}
 
 source "$CONDA_BASE/etc/profile.d/conda.sh"
@@ -50,7 +50,7 @@ GENERATOR_ARGS=(
     --output-root "$EVAL_OUTPUT_ROOT"
     --gpu-ids 0
     --serial
-    --model "Qwen3-8B-Base=$PROJECT_DIR/model/Qwen3-8B-Base"
+    --model "Qwen3-8B=$PROJECT_DIR/model/Qwen3-8B"
 )
 if [[ "${EVAL_OVERWRITE:-0}" == "1" ]]; then
     GENERATOR_ARGS+=(--overwrite)
@@ -58,7 +58,7 @@ fi
 python eval_baselines.py "${GENERATOR_ARGS[@]}"
 
 python grade.py \
-    --eval-dir "$EVAL_OUTPUT_ROOT/Qwen3-8B-Base" \
-    --length-tokenizer "$PROJECT_DIR/model/Qwen3-1.7B-Base"
+    --eval-dir "$EVAL_OUTPUT_ROOT/Qwen3-8B" \
+    --length-tokenizer "$PROJECT_DIR/model/Qwen3-8B"
 
 python summarize_baseline_results.py --output-root "$EVAL_OUTPUT_ROOT"
