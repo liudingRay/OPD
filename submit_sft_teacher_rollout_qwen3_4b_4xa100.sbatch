@@ -19,7 +19,9 @@
 #SBATCH --output=/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD/logs/%x-%j.out
 #SBATCH --error=/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD/logs/%x-%j.err
 
-set -euo pipefail
+# Some Conda activation hooks reference optional, unset tool variables. Enable
+# -u only after activation so those hooks can run on a fresh Slurm shell.
+set -eo pipefail
 
 PROJECT_DIR=${PROJECT_DIR:-/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD}
 CONDA_BASE=${CONDA_BASE:-/leonardo/home/userexternal/jbi00000/miniconda3}
@@ -32,6 +34,7 @@ GPU_IDS=${GPU_IDS:-0,1,2,3}
 
 source "$CONDA_BASE/etc/profile.d/conda.sh"
 conda activate "$CONDA_ENV"
+set -u
 cd "$PROJECT_DIR"
 
 export TRITON_CACHE_DIR="$OPD_CACHE_ROOT/triton"
