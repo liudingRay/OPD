@@ -13,7 +13,9 @@
 #SBATCH --output=/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD/logs/%x-%j.out
 #SBATCH --error=/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD/logs/%x-%j.err
 
-set -euo pipefail
+# Conda's compiler deactivation hooks reference optional backup variables.
+# Keep nounset disabled until `conda activate` has completed successfully.
+set -eo pipefail
 
 PROJECT_DIR=/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD
 CONDA_BASE=/leonardo/home/userexternal/jbi00000/miniconda3
@@ -25,6 +27,7 @@ STAGING_DIR="$PROJECT_DIR/model/.Qwen3-14B-Base-GRPO.merge-${SLURM_JOB_ID}"
 
 source "$CONDA_BASE/etc/profile.d/conda.sh"
 conda activate "$WORK/$USER/conda_envs/opd-cu118"
+set -u
 cd "$PROJECT_DIR/verl"
 
 # Always use the checked-out verl merger rather than a possibly different
