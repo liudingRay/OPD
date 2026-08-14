@@ -57,7 +57,9 @@ def launch():
     if is_env_enabled("USE_MCA"):  # force use torchrun
         os.environ["FORCE_TORCHRUN"] = "1"
 
-    if command == "train" and (
+    # A torchrun worker inherits FORCE_TORCHRUN. Do not let that worker start
+    # another nested torchrun; it must dispatch directly to run_exp below.
+    if command == "train" and "LOCAL_RANK" not in os.environ and (
         is_env_enabled("FORCE_TORCHRUN") or (get_device_count() > 1 and not use_ray() and not use_kt())
     ):
         # launch distributed training
