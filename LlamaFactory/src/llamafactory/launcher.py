@@ -104,7 +104,9 @@ def launch():
                     master_port=master_port,
                     max_restarts=max_restarts,
                     file_name=__file__,
-                    args=" ".join(sys.argv[1:]),
+                    # `command` was removed from sys.argv above. The child
+                    # launcher still needs it to dispatch to `run_exp`.
+                    args=" ".join([command] + sys.argv[1:]),
                 )
                 .split(),
                 env=env,
@@ -124,7 +126,9 @@ def launch():
                     master_addr=master_addr,
                     master_port=master_port,
                     file_name=__file__,
-                    args=" ".join(sys.argv[1:]),
+                    # `command` was removed from sys.argv above. The child
+                    # launcher still needs it to dispatch to `run_exp`.
+                    args=" ".join([command] + sys.argv[1:]),
                 )
                 .split(),
                 env=env,
