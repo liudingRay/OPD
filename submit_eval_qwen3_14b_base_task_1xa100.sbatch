@@ -50,10 +50,15 @@ export HF_HOME="$OPD_CACHE_ROOT/huggingface"
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
 export HF_HUB_CACHE="$HF_HOME/hub"
 export OUTLINES_CACHE_DIR="$OPD_CACHE_ROOT/outlines/${SLURM_JOB_ID}"
+# vLLM enables torch.compile by default. Keep this job out of the shared
+# ~/.cache/vllm tree, where two concurrently-started engines can otherwise
+# race while writing compile/autotune cache metadata.
+export VLLM_CACHE_ROOT="$OPD_CACHE_ROOT/vllm/${SLURM_JOB_ID}"
 unset ROCR_VISIBLE_DEVICES
 
 mkdir -p "$PROJECT_DIR/logs" "$EVAL_OUTPUT_ROOT" "$TRITON_CACHE_DIR" \
-    "$TORCHINDUCTOR_CACHE_DIR" "$HF_DATASETS_CACHE" "$HF_HUB_CACHE" "$OUTLINES_CACHE_DIR"
+    "$TORCHINDUCTOR_CACHE_DIR" "$HF_DATASETS_CACHE" "$HF_HUB_CACHE" "$OUTLINES_CACHE_DIR" \
+    "$VLLM_CACHE_ROOT"
 
 echo "Job ID: ${SLURM_JOB_ID}"
 echo "Node: $(hostname)"
@@ -70,6 +75,8 @@ WORKER_ZERO_ROOT="$WORKER_ROOT/gpu0"
 WORKER_ONE_ROOT="$WORKER_ROOT/gpu1"
 WORKER_ZERO_OUTPUT="$WORKER_ZERO_ROOT/$MODEL_NAME/${TASK_LOWER}_t0.7_p0.95_n8-MNT31744.jsonl"
 WORKER_ONE_OUTPUT="$WORKER_ONE_ROOT/$MODEL_NAME/${TASK_LOWER}_t0.7_p0.95_n8-MNT31744.jsonl"
+WORKER_ZERO_CACHE_ROOT="$VLLM_CACHE_ROOT/gpu0"
+WORKER_ONE_CACHE_ROOT="$VLLM_CACHE_ROOT/gpu1"
 
 if [[ -f "$FINAL_OUTPUT" && "${EVAL_OVERWRITE:-0}" != "1" ]]; then
     echo "Reusing completed result: $FINAL_OUTPUT"
@@ -86,9 +93,18 @@ else
         WORKER_ARGS+=(--overwrite)
     fi
 
-    python eval_baselines.py --output-root "$WORKER_ZERO_ROOT" --gpu-ids 0 "${WORKER_ARGS[@]}" &
+    # Each vLLM engine gets a private compile/autotune cache. This is required
+    # because the two engines start concurrently on different GPUs.
+    mkdir -p "$WORKER_ZERO_CACHE_ROOT" "$WORKER_ONE_CACHE_ROOT"
+    VLLM_CACHE_ROOT="$WORKER_ZERO_CACHE_ROOT" \
+        TORCHINDUCTOR_CACHE_DIR="$WORKER_ZERO_CACHE_ROOT/torchinductor" \
+        TRITON_CACHE_DIR="$WORKER_ZERO_CACHE_ROOT/triton" \
+        python eval_baselines.py --output-root "$WORKER_ZERO_ROOT" --gpu-ids 0 "${WORKER_ARGS[@]}" &
     WORKER_ZERO_PID=$!
-    python eval_baselines.py --output-root "$WORKER_ONE_ROOT" --gpu-ids 1 "${WORKER_ARGS[@]}" &
+    VLLM_CACHE_ROOT="$WORKER_ONE_CACHE_ROOT" \
+        TORCHINDUCTOR_CACHE_DIR="$WORKER_ONE_CACHE_ROOT/torchinductor" \
+        TRITON_CACHE_DIR="$WORKER_ONE_CACHE_ROOT/triton" \
+        python eval_baselines.py --output-root "$WORKER_ONE_ROOT" --gpu-ids 1 "${WORKER_ARGS[@]}" &
     WORKER_ONE_PID=$!
     wait "$WORKER_ZERO_PID"
     wait "$WORKER_ONE_PID"
