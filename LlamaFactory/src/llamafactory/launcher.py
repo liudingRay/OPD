@@ -186,7 +186,12 @@ def launch():
 
 
 if __name__ == "__main__":
-    # torchrun invokes this file as ``launcher.py train <config>``. Route it
-    # through the regular dispatcher so ``train`` is consumed before run_exp
-    # reads the YAML path from sys.argv.
-    launch()
+    # torchrun executes this file directly, so relative imports in launch()
+    # have no package context. Consume the forwarded train subcommand here,
+    # then preserve the original absolute-import entrypoint for run_exp.
+    if len(sys.argv) > 1 and sys.argv[1] == "train":
+        sys.argv.pop(1)
+
+    from llamafactory.train.tuner import run_exp
+
+    run_exp()
