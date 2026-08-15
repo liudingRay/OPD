@@ -186,6 +186,7 @@ def launch():
 
 
 if __name__ == "__main__":
-    from llamafactory.train.tuner import run_exp  # use absolute import
-
-    run_exp()
+    # torchrun invokes this file as ``launcher.py train <config>``. Route it
+    # through the regular dispatcher so ``train`` is consumed before run_exp
+    # reads the YAML path from sys.argv.
+    launch()
