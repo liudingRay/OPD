@@ -8,7 +8,9 @@ do_train: true
 finetuning_type: full
 deepspeed: examples/deepspeed/ds_z2_config.json
 flash_attn: fa2
-enable_liger_kernel: true
+# The installed liger-kernel imports a newer Transformers-only HybridCache.
+# It is an optional acceleration and is not required for Qwen3 SFT.
+enable_liger_kernel: false
 
 ### dataset
 dataset: OpenThought3-4B
