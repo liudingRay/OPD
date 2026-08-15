@@ -1,5 +1,5 @@
 #!/bin/bash
-# Evaluate one Qwen3-14B-Base GRPO benchmark with avg@16 on two A100 GPUs.
+# Evaluate one Qwen3-14B GRPO benchmark with avg@16 on two A100 GPUs.
 # Submit each benchmark as an independent job:
 #   sbatch --export=ALL,TASK=AIME24 submit_eval_qwen3_14b_base_task_1xa100.sbatch
 #   sbatch --export=ALL,TASK=AIME25 submit_eval_qwen3_14b_base_task_1xa100.sbatch
@@ -8,7 +8,7 @@
 # Each GPU generates eight independent samples per problem, then the two shards
 # are merged into the standard 16-sample JSONL. After all three jobs complete,
 # run the grading commands printed below to score and summarize the full set.
-#SBATCH --job-name=eval-qwen3-14b-base-grpo
+#SBATCH --job-name=eval-qwen3-14b-grpo
 #SBATCH --account=EUHPC_D33_157
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
@@ -35,8 +35,9 @@ esac
 PROJECT_DIR=${PROJECT_DIR:-/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD}
 CONDA_BASE=${CONDA_BASE:-/leonardo/home/userexternal/jbi00000/miniconda3}
 OPD_CACHE_ROOT=${OPD_CACHE_ROOT:-/leonardo_work/EUHPC_D33_157/OPD-experiment/.cache/opd}
-EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$PROJECT_DIR/scripts/val/eval/justrl_eval_outputs/qwen3-14b-base-grpo-no-thinking-n16}
+EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$PROJECT_DIR/scripts/val/eval/justrl_eval_outputs/qwen3-14b-grpo-no-thinking-n16}
 CONDA_ENV=${CONDA_ENV:-$WORK/$USER/conda_envs/opd-cu118}
+MODEL_NAME=${MODEL_NAME:-Qwen3-14B-GRPO}
 
 source "$CONDA_BASE/etc/profile.d/conda.sh"
 conda activate "$CONDA_ENV"
@@ -62,7 +63,6 @@ nvidia-smi
 
 cd "$PROJECT_DIR/scripts/val/eval"
 TASK_LOWER=$(printf '%s' "$TASK" | tr '[:upper:]' '[:lower:]')
-MODEL_NAME=Qwen3-14B-Base-GRPO
 MODEL_OUTPUT_DIR="$EVAL_OUTPUT_ROOT/$MODEL_NAME"
 FINAL_OUTPUT="$MODEL_OUTPUT_DIR/${TASK_LOWER}_t0.7_p0.95_n16-MNT31744.jsonl"
 WORKER_ROOT="$EVAL_OUTPUT_ROOT/.workers/$TASK"
@@ -102,6 +102,6 @@ fi
 
 echo "Generation complete for $TASK. After all three task jobs finish, run:"
 echo "  cd $PROJECT_DIR/scripts/val/eval"
-printf '  python grade.py --eval-dir %s/Qwen3-14B-Base-GRPO \\\n' "$EVAL_OUTPUT_ROOT"
-printf '    --length-tokenizer %s/model/Qwen3-14B-Base-GRPO\n' "$PROJECT_DIR"
+printf '  python grade.py --eval-dir %s/%s \\\n' "$EVAL_OUTPUT_ROOT" "$MODEL_NAME"
+printf '    --length-tokenizer %s/model/%s\n' "$PROJECT_DIR" "$MODEL_NAME"
 echo "  python summarize_baseline_results.py --output-root $EVAL_OUTPUT_ROOT"

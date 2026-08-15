@@ -1,5 +1,5 @@
 #!/bin/bash
-# Convert the final Qwen3-14B-Base GRPO FSDP actor checkpoint to a standalone
+# Convert the final Qwen3-14B GRPO FSDP actor checkpoint to a standalone
 # Hugging Face/vLLM model directory. This is a CPU/RAM-only job: it does not
 # start Ray, vLLM, or a training process.
 #SBATCH --job-name=merge-qwen3-14b-grpo
@@ -19,11 +19,12 @@ set -eo pipefail
 
 PROJECT_DIR=/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD
 CONDA_BASE=/leonardo/home/userexternal/jbi00000/miniconda3
-RUN_DIR="$PROJECT_DIR/checkpoint/grpo_DAPO-Math-17k-qwen3-14b-grpo-2node-4xa100_Qwen3-14B-Base_Qwen3-14B-Base_7168-T_1.0-Tch_1.0-n_4-mbs_8-topk_0-topk_strategy_union-rw_student_p-2026-07-26_11-30-16"
+RUN_DIR="$PROJECT_DIR/checkpoint/grpo_DAPO-Math-17k-qwen3-14b-grpo-2node-4xa100_Qwen3-14B_Qwen3-14B_7168-T_1.0-Tch_1.0-n_4-mbs_8-topk_0-topk_strategy_union-rw_student_p"
 EXPECTED_STEP=1119
 ACTOR_CKPT="$RUN_DIR/global_step_${EXPECTED_STEP}/actor"
-MERGED_DIR="$PROJECT_DIR/model/Qwen3-14B-Base-GRPO"
-STAGING_DIR="$PROJECT_DIR/model/.Qwen3-14B-Base-GRPO.merge-${SLURM_JOB_ID}"
+MERGED_MODEL_NAME=Qwen3-14B-GRPO
+MERGED_DIR="$PROJECT_DIR/model/$MERGED_MODEL_NAME"
+STAGING_DIR="$PROJECT_DIR/model/.${MERGED_MODEL_NAME}.merge-${SLURM_JOB_ID}"
 
 source "$CONDA_BASE/etc/profile.d/conda.sh"
 conda activate "$WORK/$USER/conda_envs/opd-cu118"
@@ -57,6 +58,25 @@ for REQUIRED_FILE in "$ACTOR_CKPT/fsdp_config.json" "$ACTOR_CKPT/huggingface/con
         exit 1
     fi
 done
+
+# A successful FSDP merge requires every actor shard, not only rank zero.
+# Check them before allocating RAM to deserialize the checkpoint.
+python - "$ACTOR_CKPT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+actor_checkpoint = Path(sys.argv[1])
+world_size = json.loads((actor_checkpoint / "fsdp_config.json").read_text())["world_size"]
+missing = [
+    actor_checkpoint / f"model_world_size_{world_size}_rank_{rank}.pt"
+    for rank in range(world_size)
+    if not (actor_checkpoint / f"model_world_size_{world_size}_rank_{rank}.pt").is_file()
+]
+if missing:
+    raise SystemExit("Missing FSDP actor shard(s):\n" + "\n".join(map(str, missing)))
+print(f"Verified {world_size} FSDP actor shard(s).")
+PY
 
 # Do not overwrite a completed model. Write to a job-specific staging directory
 # first, then publish atomically only after the expected HF files exist.
