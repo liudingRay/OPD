@@ -12,6 +12,9 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=480G
 #SBATCH --time=24:00:00
+# Signal only the batch shell 20 minutes before the time limit. The trap
+# below requests a final checkpoint at the next safe trainer-step boundary.
+#SBATCH --signal=B:USR1@1200
 #SBATCH --output=/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD/logs/%x-%j.out
 #SBATCH --error=/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD/logs/%x-%j.err
 
@@ -35,24 +38,35 @@ export HF_HOME="$OPD_CACHE_ROOT/huggingface"
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
 export HF_HUB_CACHE="$HF_HOME/hub"
 export OUTLINES_CACHE_DIR="$OPD_CACHE_ROOT/outlines/${SLURM_JOB_ID}"
+export OPD_TIMEOUT_SAVE_MARKER="$PROJECT_DIR/logs/save-before-time-limit-${SLURM_JOB_ID}"
 unset ROCR_VISIBLE_DEVICES
 
 # Train Qwen3-1.7B-Base as the student from its base-model weights.  Do not
 # load the earlier DeepSeek-1.5B FSDP checkpoint: it is a different model.
-# Qwen3-4B-Base remains the frozen teacher for DAPO-Math-17k.
+# Qwen3-4B remains the frozen teacher for DAPO-Math-17k.
 export ACTOR_MODEL_PATH=model/Qwen3-1.7B-Base
 export ACTOR_MODEL_NAME=Qwen3-1.7B-Base
-export REWARD_MODEL_PATH=model/Qwen3-4B-Base
-export REWARD_MODEL_NAME=Qwen3-4B-Base
-export TRAINER_RESUME_MODE=disable
-unset TRAINER_RESUME_FROM_PATH
-export TRAINER_TOTAL_EPOCHS=2
-export EXPERIMENT_NAME="token_reward_direct_DAPO-Math-17k-curriculum-opd-2node-4xa100_Qwen3-1.7B-Base_Qwen3-4B-Base_7168-T_1.0-Tch_1.0-n_4-mbs_64-topk_16-topk_strategy_only_stu-rw_student_p-$(date +%Y-%m-%d_%H-%M-%S)"
+export REWARD_MODEL_PATH=model/Qwen3-4B
+export REWARD_MODEL_NAME=Qwen3-4B
+# Keep this name and checkpoint root stable across resubmissions so verl can
+# read latest_checkpointed_iteration.txt and resume the matching FSDP state.
+export EXPERIMENT_NAME="token_reward_direct_DAPO-Math-17k-curriculum-opd-2node-4xa100_Qwen3-1.7B-Base_Qwen3-4B_7168-T_1.0-Tch_1.0-n_4-mbs_64-topk_16-topk_strategy_only_stu-rw_student_p"
 export CKPT_PATH="checkpoint/${EXPERIMENT_NAME}"
+export TRAINER_RESUME_MODE=auto
+unset TRAINER_RESUME_FROM_PATH
+export TRAINER_SAVE_FREQ=100
+export TRAINER_TOTAL_EPOCHS=2
 
 mkdir -p "$PROJECT_DIR/logs" "$WANDB_DIR" "$TRITON_CACHE_DIR" \
     "$TORCHINDUCTOR_CACHE_DIR" "$HF_DATASETS_CACHE" "$HF_HUB_CACHE" \
     "$OUTLINES_CACHE_DIR" "$OPD_CACHE_ROOT/verl-rlhf"
+rm -f "$OPD_TIMEOUT_SAVE_MARKER"
+
+save_before_time_limit() {
+    echo "$(date): received the Slurm pre-time-limit warning; requesting a final checkpoint."
+    touch "$OPD_TIMEOUT_SAVE_MARKER"
+}
+trap save_before_time_limit USR1
 
 mapfile -t NODES < <(scontrol show hostnames "$SLURM_JOB_NODELIST")
 HEAD_NODE=${NODES[0]}
