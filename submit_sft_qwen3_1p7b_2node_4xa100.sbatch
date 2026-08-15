@@ -79,7 +79,10 @@ from torch.utils.cpp_extension import CUDA_HOME
 
 if CUDA_HOME != os.environ["CUDA_HOME"]:
     raise RuntimeError(f"PyTorch resolved CUDA_HOME={CUDA_HOME!r}, expected {os.environ['CUDA_HOME']!r}")
+from deepspeed.ops.op_builder.builder import installed_cuda_version
+
 print(f"PyTorch CUDA_HOME: {CUDA_HOME}")
+print(f"DeepSpeed nvcc version: {installed_cuda_version()}")
 PY
 
 if [[ -e "$SFT_OUTPUT" ]]; then
