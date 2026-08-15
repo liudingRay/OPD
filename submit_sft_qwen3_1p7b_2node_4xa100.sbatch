@@ -20,6 +20,9 @@ set -eo pipefail
 PROJECT_DIR=/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD
 CONDA_BASE=/leonardo/home/userexternal/jbi00000/miniconda3
 CONDA_ENV=/leonardo_work/EUHPC_D33_157/jbi00000/conda_envs/opd-sft-py311
+# DeepSpeed queries nvcc even when no custom op is compiled. Keep the Python
+# runtime in CONDA_ENV, but use the existing CUDA 11.8 toolkit explicitly.
+CUDA_TOOLKIT_ROOT=/leonardo_work/EUHPC_D33_157/jbi00000/conda_envs/opd-cu118
 OPD_CACHE_ROOT=/leonardo_work/EUHPC_D33_157/OPD-experiment/.cache/opd
 WANDB_DIR="$OPD_CACHE_ROOT/wandb"
 
@@ -33,6 +36,7 @@ source "$CONDA_BASE/etc/profile.d/conda.sh"
 conda activate "$CONDA_ENV"
 set -u
 
+export CUDA_HOME="$CUDA_TOOLKIT_ROOT"
 export WANDB_MODE=offline
 export WANDB_DIR
 export FORCE_TORCHRUN=1
@@ -61,6 +65,22 @@ if [[ ! -d "$STUDENT_MODEL" ]]; then
     echo "Missing student model: $STUDENT_MODEL" >&2
     exit 2
 fi
+
+if [[ ! -x "$CUDA_HOME/bin/nvcc" ]]; then
+    echo "Missing CUDA compiler: $CUDA_HOME/bin/nvcc" >&2
+    exit 2
+fi
+
+echo "CUDA toolkit: $CUDA_HOME"
+"$CUDA_HOME/bin/nvcc" --version
+python - <<'PY'
+import os
+from torch.utils.cpp_extension import CUDA_HOME
+
+if CUDA_HOME != os.environ["CUDA_HOME"]:
+    raise RuntimeError(f"PyTorch resolved CUDA_HOME={CUDA_HOME!r}, expected {os.environ['CUDA_HOME']!r}")
+print(f"PyTorch CUDA_HOME: {CUDA_HOME}")
+PY
 
 if [[ -e "$SFT_OUTPUT" ]]; then
     LATEST_CHECKPOINT=$(find "$SFT_OUTPUT" -mindepth 1 -maxdepth 1 -type d -name 'checkpoint-*' -print \
