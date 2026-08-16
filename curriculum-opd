@@ -43,19 +43,35 @@ unset ROCR_VISIBLE_DEVICES
 
 # Train Qwen3-1.7B-Base as the student from its base-model weights.  Do not
 # load the earlier DeepSeek-1.5B FSDP checkpoint: it is a different model.
-# Qwen3-4B remains the frozen teacher for DAPO-Math-17k.
+# Qwen3-14B is the frozen teacher/reward model for this DAPO-Math-17k
+# baseline.  Use the project-local absolute path so that every Ray worker
+# resolves the same model checkout.
 export ACTOR_MODEL_PATH=model/Qwen3-1.7B-Base
 export ACTOR_MODEL_NAME=Qwen3-1.7B-Base
-export REWARD_MODEL_PATH=model/Qwen3-4B
-export REWARD_MODEL_NAME=Qwen3-4B
+export REWARD_MODEL_PATH=/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD/model/Qwen3-14B
+export REWARD_MODEL_NAME=Qwen3-14B
 # Keep this name and checkpoint root stable across resubmissions so verl can
 # read latest_checkpointed_iteration.txt and resume the matching FSDP state.
-export EXPERIMENT_NAME="token_reward_direct_DAPO-Math-17k-curriculum-opd-2node-4xa100_Qwen3-1.7B-Base_Qwen3-4B_7168-T_1.0-Tch_1.0-n_4-mbs_64-topk_16-topk_strategy_only_stu-rw_student_p"
+export EXPERIMENT_NAME="token_reward_direct_DAPO-Math-17k_direct_opd_Qwen3-1.7B-Base_Qwen3-14B"
 export CKPT_PATH="checkpoint/${EXPERIMENT_NAME}"
 export TRAINER_RESUME_MODE=auto
 unset TRAINER_RESUME_FROM_PATH
 export TRAINER_SAVE_FREQ=100
 export TRAINER_TOTAL_EPOCHS=2
+
+# The 14B FSDP teacher shares the eight A100s with actor rollout/reference
+# workers.  These baseline settings trade throughput for reliable headroom:
+# bf16 weights, one teacher sequence per GPU, a 4K response cap, fewer
+# rollouts per update, and conservative vLLM/KV-cache allocation.
+export MODEL_DTYPE=bfloat16
+export MAX_RESP_LENGTH=4096
+export MAX_VAL_RESP_LENGTH=4096
+export MINI_BATCH_SIZE=32
+export N_RESPONSES=2
+export ROLLOUT_GPU_MEMORY_UTILIZATION=0.45
+export PPO_MAX_TOKEN_LEN_PER_GPU=8192
+export ACTOR_ENTROPY_FROM_LOGITS_WITH_CHUNKING=True
+export REWARD_MODEL_MICRO_BATCH_SIZE=1
 
 mkdir -p "$PROJECT_DIR/logs" "$WANDB_DIR" "$TRITON_CACHE_DIR" \
     "$TORCHINDUCTOR_CACHE_DIR" "$HF_DATASETS_CACHE" "$HF_HUB_CACHE" \
