@@ -1,11 +1,11 @@
 #!/bin/bash
-# Evaluate Qwen3-1.7B-Base and Qwen3-8B-Base serially: one vLLM process at a
-# time on one A100 GPU.
+# Evaluate the official Qwen3-1.7B, 4B, and 8B thinking baselines serially:
+# one vLLM process at a time on one A100 GPU.
 # Submit from the inner OPD checkout with:
-#   sbatch submit_eval_baselines_4xa100.sbatch
+#   sbatch submit_eval_qwen3_thinking_baselines_1xa100.sbatch
 # Override the result location or rerun existing outputs, for example:
-#   EVAL_OUTPUT_ROOT=/path/to/results EVAL_OVERWRITE=1 sbatch submit_eval_baselines_4xa100.sbatch
-#SBATCH --job-name=eval-qwen3-base
+#   EVAL_OUTPUT_ROOT=/path/to/results EVAL_OVERWRITE=1 sbatch submit_eval_qwen3_thinking_baselines_1xa100.sbatch
+#SBATCH --job-name=eval-qwen3-thinking
 #SBATCH --account=EUHPC_D33_157
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
@@ -22,7 +22,7 @@ set -eo pipefail
 PROJECT_DIR=${PROJECT_DIR:-/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD}
 CONDA_BASE=${CONDA_BASE:-/leonardo/home/userexternal/jbi00000/miniconda3}
 OPD_CACHE_ROOT=${OPD_CACHE_ROOT:-/leonardo_work/EUHPC_D33_157/OPD-experiment/.cache/opd}
-EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$PROJECT_DIR/scripts/val/eval/justrl_eval_outputs/qwen3-base-1p7b-8b-no-thinking-n16}
+EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$PROJECT_DIR/scripts/val/eval/justrl_eval_outputs/qwen3-thinking-1p7b-4b-8b-n16}
 CONDA_ENV=${CONDA_ENV:-$WORK/$USER/conda_envs/opd-cu118}
 
 source "$CONDA_BASE/etc/profile.d/conda.sh"
@@ -54,20 +54,22 @@ GENERATOR_ARGS=(
     --output-root "$EVAL_OUTPUT_ROOT"
     --gpu-ids 0
     --serial
-    --model "Qwen3-1.7B-Base=$PROJECT_DIR/model/Qwen3-1.7B-Base"
-    --model "Qwen3-8B-Base=$PROJECT_DIR/model/Qwen3-8B-Base"
+    --enable-thinking
+    --model "Qwen3-1.7B=$PROJECT_DIR/model/Qwen3-1.7B"
+    --model "Qwen3-4B=$PROJECT_DIR/model/Qwen3-4B"
+    --model "Qwen3-8B=$PROJECT_DIR/model/Qwen3-8B"
 )
 if [[ "${EVAL_OVERWRITE:-0}" == "1" ]]; then
     GENERATOR_ARGS+=(--overwrite)
 fi
 python eval_baselines.py "${GENERATOR_ARGS[@]}"
 
-# Rule-based grading needs no additional GPU allocation. Both selected outputs
-# use the Qwen3-1.7B tokenizer solely for a comparable output-length diagnostic.
-for MODEL_NAME in Qwen3-1.7B-Base Qwen3-8B-Base; do
+# Rule-based grading needs no additional GPU allocation. The models share the
+# Qwen3 tokenizer; use the evaluated model for its output-length diagnostic.
+for MODEL_NAME in Qwen3-1.7B Qwen3-4B Qwen3-8B; do
     python grade.py \
         --eval-dir "$EVAL_OUTPUT_ROOT/$MODEL_NAME" \
-        --length-tokenizer "$PROJECT_DIR/model/Qwen3-1.7B-Base"
+        --length-tokenizer "$PROJECT_DIR/model/$MODEL_NAME"
 done
 
 python summarize_baseline_results.py --output-root "$EVAL_OUTPUT_ROOT"

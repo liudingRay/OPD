@@ -1,8 +1,9 @@
 #!/bin/bash
-# Evaluate Qwen3-4B on AIME24, AIME25, and AMC23 with avg@16.
+# Evaluate a merged Qwen3-1.7B OPD model on AIME24, AIME25, and AMC23
+# with avg@16. Override MODEL_NAME/MODEL_PATH for each teacher run.
 # Submit from the inner OPD checkout with:
-#   sbatch submit_eval_qwen3_8b_base_1xa100.sbatch
-#SBATCH --job-name=eval-qwen3-4b
+#   sbatch submit_eval_qwen3_1p7b_opd_1xa100.sbatch
+#SBATCH --job-name=eval-qwen3-1p7b-opd
 #SBATCH --account=EUHPC_D33_157
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
@@ -19,7 +20,10 @@ set -eo pipefail
 PROJECT_DIR=${PROJECT_DIR:-/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD}
 CONDA_BASE=${CONDA_BASE:-/leonardo/home/userexternal/jbi00000/miniconda3}
 OPD_CACHE_ROOT=${OPD_CACHE_ROOT:-/leonardo_work/EUHPC_D33_157/OPD-experiment/.cache/opd}
-EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$PROJECT_DIR/scripts/val/eval/justrl_eval_outputs/qwen3-4b-no-thinking-n16}
+MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B-opd-4B}
+MODEL_PATH=${MODEL_PATH:-$PROJECT_DIR/model/$MODEL_NAME}
+EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$PROJECT_DIR/scripts/val/eval/justrl_eval_outputs/$MODEL_NAME-thinking-n16}
+ENABLE_THINKING=${ENABLE_THINKING:-1}
 CONDA_ENV=${CONDA_ENV:-$WORK/$USER/conda_envs/opd-cu118}
 
 source "$CONDA_BASE/etc/profile.d/conda.sh"
@@ -50,15 +54,25 @@ GENERATOR_ARGS=(
     --output-root "$EVAL_OUTPUT_ROOT"
     --gpu-ids 0
     --serial
-    --model "Qwen3-4B=$PROJECT_DIR/model/Qwen3-4B"
+    --model "$MODEL_NAME=$MODEL_PATH"
 )
+# Shell environment variables are strings. Accept common true/false spellings
+# explicitly instead of silently treating ENABLE_THINKING=true as false.
+case "$ENABLE_THINKING" in
+    1|true|True|TRUE) GENERATOR_ARGS+=(--enable-thinking) ;;
+    0|false|False|FALSE) ;;
+    *)
+        echo "ENABLE_THINKING must be one of: 1, true, 0, false; got: $ENABLE_THINKING" >&2
+        exit 2
+        ;;
+esac
 if [[ "${EVAL_OVERWRITE:-0}" == "1" ]]; then
     GENERATOR_ARGS+=(--overwrite)
 fi
 python eval_baselines.py "${GENERATOR_ARGS[@]}"
 
 python grade.py \
-    --eval-dir "$EVAL_OUTPUT_ROOT/Qwen3-4B" \
-    --length-tokenizer "$PROJECT_DIR/model/Qwen3-4B"
+    --eval-dir "$EVAL_OUTPUT_ROOT/$MODEL_NAME" \
+    --length-tokenizer "$MODEL_PATH"
 
 python summarize_baseline_results.py --output-root "$EVAL_OUTPUT_ROOT"

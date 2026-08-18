@@ -1,9 +1,8 @@
 #!/bin/bash
-# Convert the Qwen3-1.7B OPD FSDP actor checkpoint trained with the Qwen3-4B
-# teacher to a standalone
-# Hugging Face/vLLM model directory. This is a CPU/RAM-only job: it does not
-# start Ray, vLLM, or a training process.
-#SBATCH --job-name=merge-qwen3-1p7b-copd-4b
+# Convert a verl FSDP actor checkpoint to a standalone Hugging Face/vLLM model.
+# Override RUN_DIR, EXPECTED_STEP, and MERGED_MODEL_NAME for the target run.
+# This CPU/RAM-only job does not start Ray, vLLM, or training.
+#SBATCH --job-name=merge-fsdp-actor
 #SBATCH --account=EUHPC_D33_157
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
@@ -18,17 +17,18 @@
 # Keep nounset disabled until `conda activate` has completed successfully.
 set -eo pipefail
 
-PROJECT_DIR=/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD
-CONDA_BASE=/leonardo/home/userexternal/jbi00000/miniconda3
-RUN_DIR="$PROJECT_DIR/checkpoint/token_reward_direct_DAPO-Math-17k-curriculum-opd-2node-4xa100_Qwen3-1.7B-Base_Qwen3-4B_7168-T_1.0-Tch_1.0-n_4-mbs_64-topk_16-topk_strategy_only_stu-rw_student_p"
-EXPECTED_STEP=279
+PROJECT_DIR=${PROJECT_DIR:-/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD}
+CONDA_BASE=${CONDA_BASE:-/leonardo/home/userexternal/jbi00000/miniconda3}
+CONDA_ENV=${CONDA_ENV:-$WORK/$USER/conda_envs/opd-cu118}
+RUN_DIR=${RUN_DIR:-$PROJECT_DIR/checkpoint/token_reward_direct_DAPO-Math-17k-curriculum-opd-2node-4xa100_Qwen3-1.7B-Base_Qwen3-4B_7168-T_1.0-Tch_1.0-n_4-mbs_64-topk_16-topk_strategy_only_stu-rw_student_p}
+EXPECTED_STEP=${EXPECTED_STEP:-279}
 ACTOR_CKPT="$RUN_DIR/global_step_${EXPECTED_STEP}/actor"
-MERGED_MODEL_NAME=Qwen3-1.7B-copd-4B
+MERGED_MODEL_NAME=${MERGED_MODEL_NAME:-Qwen3-1.7B-opd-4B}
 MERGED_DIR="$PROJECT_DIR/model/$MERGED_MODEL_NAME"
 STAGING_DIR="$PROJECT_DIR/model/.${MERGED_MODEL_NAME}.merge-${SLURM_JOB_ID}"
 
 source "$CONDA_BASE/etc/profile.d/conda.sh"
-conda activate "$WORK/$USER/conda_envs/opd-cu118"
+conda activate "$CONDA_ENV"
 set -u
 cd "$PROJECT_DIR/verl"
 
