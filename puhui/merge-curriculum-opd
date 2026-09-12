@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Merge one completed puhui curriculum FSDP actor checkpoint into a standalone
+# Hugging Face model. Training and merging are intentionally separate actions.
+#
+# Usage:
+#   bash puhui/merge-curriculum-opd stage1 123
+#   bash puhui/merge-curriculum-opd stage2 456
+#   bash puhui/merge-curriculum-opd stage3 789
+
+set -euo pipefail
+
+STAGE=${1:-}
+EXPECTED_STEP=${2:-}
+
+if [[ ! "$EXPECTED_STEP" =~ ^[0-9]+$ ]]; then
+    echo "Usage: bash puhui/merge-curriculum-opd {stage1|stage2|stage3} <global-step>" >&2
+    exit 2
+fi
+
+OPD_BASE=${OPD_BASE:-/mnt/data/liudingrui}
+PROJECT_DIR=${PROJECT_DIR:-$OPD_BASE/projects/OPD}
+OPD_ENV=${OPD_ENV:-$OPD_BASE/envs/opd-py312}
+MODEL_ROOT=${MODEL_ROOT:-$OPD_BASE/models}
+EXPERIMENT_ROOT=${EXPERIMENT_ROOT:-$OPD_BASE/experiments/OPD}
+
+case "$STAGE" in
+    stage1)
+        EXPERIMENT_NAME=token_reward_direct_DAPO-Math-17k_curriculum-stage1_Qwen3-1.7B_Qwen3-4B
+        MERGED_MODEL_NAME=Qwen3-1.7B-OPD-4B
+        ;;
+    stage2)
+        EXPERIMENT_NAME=token_reward_direct_DAPO-Math-17k_curriculum-stage2_Qwen3-1.7B-OPD-4B_Qwen3-8B
+        MERGED_MODEL_NAME=Qwen3-1.7B-OPD-4B-8B
+        ;;
+    stage3)
+        EXPERIMENT_NAME=token_reward_direct_DAPO-Math-17k_curriculum-stage3_Qwen3-1.7B-OPD-4B-8B_Qwen3-14B
+        MERGED_MODEL_NAME=Qwen3-1.7B-OPD-4B-8B-14B
+        ;;
+    *)
+        echo "Usage: bash puhui/merge-curriculum-opd {stage1|stage2|stage3} <global-step>" >&2
+        exit 2
+        ;;
+esac
+
+RUN_DIR=$EXPERIMENT_ROOT/checkpoints/$EXPERIMENT_NAME
+ACTOR_CKPT=$RUN_DIR/global_step_$EXPECTED_STEP/actor
+MERGED_DIR=$MODEL_ROOT/$MERGED_MODEL_NAME
+RUN_STAMP=$(date +%Y%m%d_%H%M%S)
+STAGING_DIR=$MODEL_ROOT/.$MERGED_MODEL_NAME.merge-$RUN_STAMP-$$
+LOG_DIR=$EXPERIMENT_ROOT/logs
+
+if [[ ${DRY_RUN:-0} == 1 ]]; then
+    echo "Puhui curriculum merge configuration"
+    echo "  stage:       $STAGE"
+    echo "  checkpoint:  $ACTOR_CKPT"
+    echo "  target:      $MERGED_DIR"
+    echo "DRY_RUN=1: path mapping completed; merge was not started."
+    exit 0
+fi
+
+require_file() {
+    if [[ ! -f "$1" ]]; then
+        echo "Required file is missing: $1" >&2
+        exit 1
+    fi
+}
+
+require_file "$OPD_ENV/bin/activate"
+require_file "$RUN_DIR/latest_checkpointed_iteration.txt"
+require_file "$ACTOR_CKPT/fsdp_config.json"
+require_file "$ACTOR_CKPT/huggingface/config.json"
+
+RECORDED_STEP=$(tr -d '[:space:]' < "$RUN_DIR/latest_checkpointed_iteration.txt")
+if [[ "$RECORDED_STEP" != "$EXPECTED_STEP" ]]; then
+    echo "Refusing to merge: tracker records global_step_$RECORDED_STEP, expected global_step_$EXPECTED_STEP." >&2
+    exit 1
+fi
+
+if [[ -e "$MERGED_DIR" ]]; then
+    echo "Refusing to overwrite existing target: $MERGED_DIR" >&2
+    exit 1
+fi
+
+if [[ -e "$STAGING_DIR" ]]; then
+    echo "Unexpected existing staging directory: $STAGING_DIR" >&2
+    exit 1
+fi
+
+source "$OPD_ENV/bin/activate"
+cd "$PROJECT_DIR/verl"
+
+export CUDA_VISIBLE_DEVICES=""
+export PYTHONPATH="$PROJECT_DIR/verl${PYTHONPATH:+:$PYTHONPATH}"
+export TOKENIZERS_PARALLELISM=false
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-16}
+
+mkdir -p "$LOG_DIR" "$MODEL_ROOT"
+LOG_FILE=$LOG_DIR/merge-$MERGED_MODEL_NAME-step$EXPECTED_STEP-$RUN_STAMP.log
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "Puhui curriculum checkpoint merge"
+echo "  stage:       $STAGE"
+echo "  checkpoint:  $ACTOR_CKPT"
+echo "  target:      $MERGED_DIR"
+echo "  log:         $LOG_FILE"
+
+# A valid FSDP merge needs every model shard recorded by fsdp_config.json.
+python - "$ACTOR_CKPT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+actor_checkpoint = Path(sys.argv[1])
+world_size = json.loads((actor_checkpoint / "fsdp_config.json").read_text())["world_size"]
+missing = [
+    actor_checkpoint / f"model_world_size_{world_size}_rank_{rank}.pt"
+    for rank in range(world_size)
+    if not (actor_checkpoint / f"model_world_size_{world_size}_rank_{rank}.pt").is_file()
+]
+if missing:
+    raise SystemExit("Missing FSDP actor shard(s):\n" + "\n".join(map(str, missing)))
+print(f"Verified {world_size} FSDP actor shard(s).")
+PY
+
+# Write to a unique staging directory. A failed merge is left in staging for
+# diagnosis and never replaces or partially creates the final model directory.
+python -m verl.model_merger merge \
+    --backend fsdp \
+    --local_dir "$ACTOR_CKPT" \
+    --target_dir "$STAGING_DIR"
+
+require_file "$STAGING_DIR/config.json"
+if ! compgen -G "$STAGING_DIR/model*.safetensors" > /dev/null; then
+    echo "Merge finished without model safetensors in $STAGING_DIR" >&2
+    exit 1
+fi
+
+python - "$STAGING_DIR" <<'PY'
+import sys
+from transformers import AutoConfig, AutoTokenizer
+
+model_dir = sys.argv[1]
+config = AutoConfig.from_pretrained(model_dir, local_files_only=True)
+tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
+print(f"Verified merged model: type={config.model_type}, vocab={len(tokenizer)}")
+PY
+
+# Staging and final target share MODEL_ROOT, so this rename publishes the fully
+# verified model atomically without overwriting an existing directory.
+mv "$STAGING_DIR" "$MERGED_DIR"
+
+echo "Merged model is ready: $MERGED_DIR"
+du -sh "$MERGED_DIR"
+find "$MERGED_DIR" -maxdepth 1 -type f -printf '%f\n' | sort

@@ -13,3 +13,6 @@ opd-cu118-after.txt
 # Leonardo generated artifacts
 /outputs/
 /verl/flash_attn-*.whl
+
+# Local puhui server notes (scripts under /puhui remain trackable)
+/puhui/README.local.md
