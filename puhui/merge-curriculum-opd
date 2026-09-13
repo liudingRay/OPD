@@ -17,7 +17,7 @@ if [[ ! "$EXPECTED_STEP" =~ ^[0-9]+$ ]]; then
     exit 2
 fi
 
-OPD_BASE=${OPD_BASE:-/mnt/data/liudingrui}
+OPD_BASE=${OPD_BASE:-/mnt/data/chenhang/ldr}
 PROJECT_DIR=${PROJECT_DIR:-$OPD_BASE/projects/OPD}
 OPD_ENV=${OPD_ENV:-$OPD_BASE/envs/opd-py312}
 MODEL_ROOT=${MODEL_ROOT:-$OPD_BASE/models}
