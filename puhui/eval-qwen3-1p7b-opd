@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# Evaluate one merged Qwen3-1.7B OPD model on AIME24, AIME25, and AMC23
+# with thinking enabled and avg@16 on the shared puhui H800 server.
+#
+# Usage (choose one currently idle physical GPU explicitly):
+#   CUDA_VISIBLE_DEVICES=6 bash puhui/eval-qwen3-1p7b-opd
+#
+# Override MODEL_PATH/MODEL_NAME to evaluate another merged checkpoint.
+
+set -euo pipefail
+
+OPD_BASE=${OPD_BASE:-/mnt/data/chenhang/ldr}
+PROJECT_DIR=${PROJECT_DIR:-$OPD_BASE/projects/OPD}
+OPD_ENV=${OPD_ENV:-$OPD_BASE/envs/opd-py312}
+OPD_CACHE_ROOT=${OPD_CACHE_ROOT:-$OPD_BASE/cache/opd}
+EXPERIMENT_ROOT=${EXPERIMENT_ROOT:-$OPD_BASE/experiments/OPD}
+
+MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B-OPD-4B-stage1-step1118}
+MODEL_PATH=${MODEL_PATH:-$EXPERIMENT_ROOT/checkpoints/token_reward_direct_DAPO-Math-17k_curriculum-stage1_Qwen3-1.7B_Qwen3-4B/global_step_1118}
+EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$EXPERIMENT_ROOT/evaluation/$MODEL_NAME-thinking-n16}
+ENABLE_THINKING=${ENABLE_THINKING:-1}
+EVAL_GPU_ID=${EVAL_GPU_ID:-${CUDA_VISIBLE_DEVICES:-}}
+
+require_file() {
+    if [[ ! -f "$1" ]]; then
+        echo "Required file is missing: $1" >&2
+        exit 1
+    fi
+}
+
+require_dir() {
+    if [[ ! -d "$1" ]]; then
+        echo "Required directory is missing: $1" >&2
+        exit 1
+    fi
+}
+
+require_dir "$PROJECT_DIR"
+require_file "$OPD_ENV/bin/activate"
+require_dir "$MODEL_PATH"
+require_file "$MODEL_PATH/config.json"
+if ! compgen -G "$MODEL_PATH/model*.safetensors" > /dev/null; then
+    echo "Hugging Face model weights are missing from: $MODEL_PATH" >&2
+    exit 1
+fi
+for task in AIME24 AIME25 AMC23; do
+    require_file "$PROJECT_DIR/scripts/val/data/$task/test.parquet"
+done
+
+if [[ -z "$EVAL_GPU_ID" || ! "$EVAL_GPU_ID" =~ ^[0-9]+$ ]]; then
+    echo "Select exactly one physical GPU with CUDA_VISIBLE_DEVICES=<GPU-ID> or EVAL_GPU_ID=<GPU-ID>." >&2
+    exit 2
+fi
+if ! nvidia-smi -i "$EVAL_GPU_ID" --query-gpu=index --format=csv,noheader,nounits >/dev/null 2>&1; then
+    echo "Physical GPU ID does not exist or is not accessible: $EVAL_GPU_ID" >&2
+    exit 1
+fi
+
+echo "Puhui OPD evaluation configuration"
+echo "  model label:  $MODEL_NAME"
+echo "  model path:   $MODEL_PATH"
+echo "  output root:  $EVAL_OUTPUT_ROOT"
+echo "  physical GPU: $EVAL_GPU_ID"
+echo "  thinking:     $ENABLE_THINKING"
+echo "  protocol:     AIME24/AIME25/AMC23, avg@16, temperature=0.7, top_p=0.95"
+
+if [[ ${DRY_RUN:-0} == 1 ]]; then
+    echo "DRY_RUN=1: preflight completed; evaluation was not started."
+    exit 0
+fi
+
+GPU_PROCESSES=$(nvidia-smi -i "$EVAL_GPU_ID" --query-compute-apps=pid,process_name \
+    --format=csv,noheader,nounits 2>/dev/null || true)
+if [[ -n "$GPU_PROCESSES" ]]; then
+    echo "Refusing to start because physical GPU $EVAL_GPU_ID already has compute processes:" >&2
+    printf '%s\n' "$GPU_PROCESSES" >&2
+    exit 1
+fi
+
+RUN_STAMP=$(date +%Y%m%d_%H%M%S)
+LOG_DIR=${LOG_DIR:-$EXPERIMENT_ROOT/logs}
+OUTLINES_CACHE_DIR=${OUTLINES_CACHE_DIR:-$OPD_CACHE_ROOT/outlines/eval-$MODEL_NAME-$RUN_STAMP-$$}
+TMPDIR=${TMPDIR:-$OPD_BASE/t/eval-$MODEL_NAME}
+
+mkdir -p \
+    "$EVAL_OUTPUT_ROOT" \
+    "$LOG_DIR" \
+    "$OPD_CACHE_ROOT/triton" \
+    "$OPD_CACHE_ROOT/torchinductor" \
+    "$OPD_CACHE_ROOT/huggingface/datasets" \
+    "$OPD_CACHE_ROOT/huggingface/hub" \
+    "$OUTLINES_CACHE_DIR" \
+    "$TMPDIR"
+
+source "$OPD_ENV/bin/activate"
+cd "$PROJECT_DIR"
+
+export CUDA_HOME=${CUDA_HOME:-/usr/local/cuda-12.8}
+export PATH="$OPD_ENV/bin:$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export PYTHONPATH="$PROJECT_DIR/verl${PYTHONPATH:+:$PYTHONPATH}"
+export HF_HOME="$OPD_CACHE_ROOT/huggingface"
+export HF_DATASETS_CACHE="$HF_HOME/datasets"
+export HF_HUB_CACHE="$HF_HOME/hub"
+export TRITON_CACHE_DIR="$OPD_CACHE_ROOT/triton"
+export TORCHINDUCTOR_CACHE_DIR="$OPD_CACHE_ROOT/torchinductor"
+export OUTLINES_CACHE_DIR
+export TMPDIR
+export PYTHONUNBUFFERED=1
+export TOKENIZERS_PARALLELISM=true
+
+# eval_baselines assigns CUDA_VISIBLE_DEVICES inside its worker. Remove the
+# launcher's mask and pass the selected physical ID to that worker directly.
+unset CUDA_VISIBLE_DEVICES
+
+LOG_FILE="$LOG_DIR/eval-$MODEL_NAME-$RUN_STAMP.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "Start time: $(date --iso-8601=seconds)"
+echo "Log file: $LOG_FILE"
+python --version
+python -m pip check
+nvidia-smi -i "$EVAL_GPU_ID" --query-gpu=index,name,memory.used,utilization.gpu --format=csv,noheader
+
+cd "$PROJECT_DIR/scripts/val/eval"
+GENERATOR_ARGS=(
+    --model-root "$OPD_BASE/models"
+    --data-dir "$PROJECT_DIR/scripts/val/data"
+    --output-root "$EVAL_OUTPUT_ROOT"
+    --gpu-ids "$EVAL_GPU_ID"
+    --serial
+    --model "$MODEL_NAME=$MODEL_PATH"
+    --num-samples 16
+    --temperature 0.7
+    --top-p 0.95
+    --max-tokens 31744
+)
+case "$ENABLE_THINKING" in
+    1|true|True|TRUE) GENERATOR_ARGS+=(--enable-thinking) ;;
+    0|false|False|FALSE) ;;
+    *)
+        echo "ENABLE_THINKING must be one of: 1, true, 0, false; got: $ENABLE_THINKING" >&2
+        exit 2
+        ;;
+esac
+if [[ ${EVAL_OVERWRITE:-0} == 1 ]]; then
+    GENERATOR_ARGS+=(--overwrite)
+fi
+
+python eval_baselines.py "${GENERATOR_ARGS[@]}"
+python grade.py \
+    --eval-dir "$EVAL_OUTPUT_ROOT/$MODEL_NAME" \
+    --length-tokenizer "$MODEL_PATH"
+python summarize_baseline_results.py --output-root "$EVAL_OUTPUT_ROOT"
+
+echo "End time: $(date --iso-8601=seconds)"
+echo "Evaluation summary: $EVAL_OUTPUT_ROOT/baseline_summary.csv"

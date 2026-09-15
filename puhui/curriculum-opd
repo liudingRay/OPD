@@ -3,7 +3,8 @@
 #
 # Usage (choose four currently idle physical GPU IDs explicitly):
 #   CUDA_VISIBLE_DEVICES=0,1,4,5 bash puhui/curriculum-opd stage1
-#   CUDA_VISIBLE_DEVICES=0,1,4,5 bash puhui/curriculum-opd stage2
+#   ACTOR_MODEL_PATH=/path/to/merged-stage1 \
+#     CUDA_VISIBLE_DEVICES=0,1,4,5 bash puhui/curriculum-opd stage2
 #   CUDA_VISIBLE_DEVICES=0,1,4,5 bash puhui/curriculum-opd stage3
 #
 # Each stage consumes the separately merged Hugging Face model from the previous
@@ -39,8 +40,11 @@ MODEL_ROOT=${MODEL_ROOT:-$OPD_BASE/models}
 OPD_CACHE_ROOT=${OPD_CACHE_ROOT:-$OPD_BASE/cache/opd}
 EXPERIMENT_ROOT=${EXPERIMENT_ROOT:-$OPD_BASE/experiments/OPD}
 
-ACTOR_MODEL_PATH=$MODEL_ROOT/$ACTOR_MODEL_NAME
-REWARD_MODEL_PATH=$MODEL_ROOT/$REWARD_MODEL_NAME
+# The curriculum labels define run names. The actual model locations remain
+# overridable so a verified merged checkpoint does not need to be copied into
+# MODEL_ROOT before starting the next stage.
+ACTOR_MODEL_PATH=${ACTOR_MODEL_PATH:-$MODEL_ROOT/$ACTOR_MODEL_NAME}
+REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-$MODEL_ROOT/$REWARD_MODEL_NAME}
 
 TRAIN_DATASET=$PROJECT_DIR/datasets/dapo-math-17k.parquet
 TRAIN_DATASET_NAME=DAPO-Math-17k
@@ -103,12 +107,20 @@ require_dir() {
     fi
 }
 
+require_hf_model() {
+    local model_dir=$1
+    require_dir "$model_dir"
+    require_file "$model_dir/config.json"
+    if ! compgen -G "$model_dir/model*.safetensors" > /dev/null; then
+        echo "Hugging Face model weights are missing from: $model_dir" >&2
+        exit 1
+    fi
+}
+
 require_dir "$PROJECT_DIR"
 require_file "$OPD_ENV/bin/activate"
-require_file "$ACTOR_MODEL_PATH/config.json"
-require_file "$ACTOR_MODEL_PATH/model.safetensors.index.json"
-require_file "$REWARD_MODEL_PATH/config.json"
-require_file "$REWARD_MODEL_PATH/model.safetensors.index.json"
+require_hf_model "$ACTOR_MODEL_PATH"
+require_hf_model "$REWARD_MODEL_PATH"
 require_file "$TRAIN_DATASET"
 
 IFS=',' read -r -a GPU_IDS <<< "$CUDA_VISIBLE_DEVICES"
@@ -117,17 +129,17 @@ if [[ ${#GPU_IDS[@]} -ne $TRAINER_N_GPUS_PER_NODE ]]; then
     exit 1
 fi
 
-declare -A SEEN_GPU_IDS=()
+SEEN_GPU_IDS=,
 for GPU_ID in "${GPU_IDS[@]}"; do
     if [[ ! "$GPU_ID" =~ ^[0-9]+$ ]]; then
         echo "Invalid physical GPU ID: $GPU_ID" >&2
         exit 1
     fi
-    if [[ -n ${SEEN_GPU_IDS[$GPU_ID]+present} ]]; then
+    if [[ "$SEEN_GPU_IDS" == *",$GPU_ID,"* ]]; then
         echo "Duplicate physical GPU ID: $GPU_ID" >&2
         exit 1
     fi
-    SEEN_GPU_IDS[$GPU_ID]=1
+    SEEN_GPU_IDS+="$GPU_ID,"
     if ! nvidia-smi -i "$GPU_ID" --query-gpu=index --format=csv,noheader,nounits >/dev/null 2>&1; then
         echo "Physical GPU ID does not exist or is not accessible: $GPU_ID" >&2
         exit 1
