@@ -1148,7 +1148,11 @@ class RayPPOTrainer:
                                     batch = batch.union(distillation_output)
                         
                         # Plot overlapping tokens for Reverse KL
-                        if (self.global_steps == 1 or self.global_steps % 10 == 0) and "student_valid_counts" in batch.batch.keys():
+                        if (
+                            self.config.trainer.get("is_plot", False)
+                            and (self.global_steps == 1 or self.global_steps % 10 == 0)
+                            and "student_valid_counts" in batch.batch.keys()
+                        ):
                             try:
                                 import matplotlib.pyplot as plt
                                 import swanlab

@@ -50,38 +50,54 @@ TRAIN_DATASET=$PROJECT_DIR/datasets/dapo-math-17k.parquet
 TRAIN_DATASET_NAME=DAPO-Math-17k
 TEST_DATASET='["'$PROJECT_DIR'/datasets/test_data/AIME25/test.parquet","'$PROJECT_DIR'/datasets/test_data/AMC23/test.parquet","'$PROJECT_DIR'/datasets/test_data/AIME24/test.parquet"]'
 
-EXPERIMENT_NAME=token_reward_direct_${TRAIN_DATASET_NAME}_curriculum-${STAGE}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}
-CKPT_PATH=$EXPERIMENT_ROOT/checkpoints/$EXPERIMENT_NAME
-VALIDATION_DIR=$EXPERIMENT_ROOT/validation/$EXPERIMENT_NAME
-LOG_DIR=${LOG_DIR:-$EXPERIMENT_ROOT/logs}
-
-# Keep these conservative controls identical across all three curriculum stages.
+# Keep these controls identical across all three curriculum stages.
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
-MAX_RESP_LENGTH=${MAX_RESP_LENGTH:-4096}
-MAX_VAL_RESP_LENGTH=${MAX_VAL_RESP_LENGTH:-4096}
+MAX_RESP_LENGTH=${MAX_RESP_LENGTH:-15360}
+MAX_VAL_RESP_LENGTH=${MAX_VAL_RESP_LENGTH:-15360}
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-32}
-N_RESPONSES=${N_RESPONSES:-2}
+N_RESPONSES=${N_RESPONSES:-4}
 PARALLEL_SIZE=${PARALLEL_SIZE:-1}
 MODEL_DTYPE=${MODEL_DTYPE:-bfloat16}
 ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.45}
-PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-8192}
+PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-16384}
 REWARD_MODEL_MICRO_BATCH_SIZE=${REWARD_MODEL_MICRO_BATCH_SIZE:-1}
 TRAINER_N_GPUS_PER_NODE=4
 TRAINER_NNODES=${TRAINER_NNODES:-1}
-TRAINER_SAVE_FREQ=100
+TRAINER_SAVE_FREQ=40
 TRAINER_MAX_ACTOR_CKPT_TO_KEEP=3
 TRAINER_MAX_CRITIC_CKPT_TO_KEEP=3
 TRAINER_TEST_FREQ=${TRAINER_TEST_FREQ:--1}
 TRAINER_TOTAL_EPOCHS=${TRAINER_TOTAL_EPOCHS:-2}
 TRAINER_RESUME_MODE=${TRAINER_RESUME_MODE:-auto}
-TRAINER_LOGGER=${TRAINER_LOGGER:-'["console"]'}
+TRAINER_LOGGER=${TRAINER_LOGGER:-'["console","wandb"]'}
+TRAINER_IS_PLOT=${TRAINER_IS_PLOT:-False}
 
-TEMPERATURE=${TEMPERATURE:-1.0}
+TEMPERATURE=${TEMPERATURE:-0.6}
+TOP_P=${TOP_P:-0.95}
+GENERATION_TOP_K=${GENERATION_TOP_K:-20}
+MIN_P=${MIN_P:-0.0}
 TEACHER_TEMPERATURE=${TEACHER_TEMPERATURE:-1.0}
 REPETITION_PENALTY=${REPETITION_PENALTY:-1.0}
 LOG_PROB_TOP_K=${LOG_PROB_TOP_K:-16}
 TOP_K_STRATEGY=${TOP_K_STRATEGY:-only_stu}
 REWARD_WEIGHT_MODE=${REWARD_WEIGHT_MODE:-student_p}
+
+MAX_MODEL_LEN=$((MAX_PROMPT_LENGTH + (MAX_RESP_LENGTH > MAX_VAL_RESP_LENGTH ? MAX_RESP_LENGTH : MAX_VAL_RESP_LENGTH)))
+if (( PPO_MAX_TOKEN_LEN_PER_GPU < MAX_MODEL_LEN )); then
+    echo "PPO_MAX_TOKEN_LEN_PER_GPU=$PPO_MAX_TOKEN_LEN_PER_GPU must be at least MAX_MODEL_LEN=$MAX_MODEL_LEN." >&2
+    exit 1
+fi
+
+# Include behavior-changing settings in the default run name so auto-resume
+# cannot silently mix this configuration with the earlier 4096-token run.
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-token_reward_direct_${TRAIN_DATASET_NAME}_curriculum-${STAGE}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_r${MAX_RESP_LENGTH}-T${TEMPERATURE}-n${N_RESPONSES}-genk${GENERATION_TOP_K}-topp${TOP_P}-opdk${LOG_PROB_TOP_K}-${TOP_K_STRATEGY}}
+CKPT_PATH=$EXPERIMENT_ROOT/checkpoints/$EXPERIMENT_NAME
+VALIDATION_DIR=$EXPERIMENT_ROOT/validation/$EXPERIMENT_NAME
+LOG_DIR=${LOG_DIR:-$EXPERIMENT_ROOT/logs}
+WANDB_MODE=${WANDB_MODE:-online}
+WANDB_DIR=${WANDB_DIR:-$OPD_CACHE_ROOT/wandb}
+WANDB_PROJECT=${WANDB_PROJECT:-OnPolicyDistillation}
+WANDB_RUN_ID_FILE=${WANDB_RUN_ID_FILE:-$CKPT_PATH/wandb_run_id}
 
 if [[ -z ${CUDA_VISIBLE_DEVICES:-} ]]; then
     echo "CUDA_VISIBLE_DEVICES must explicitly list four currently idle physical GPU IDs." >&2
@@ -158,6 +174,12 @@ echo "  validation:    $VALIDATION_DIR"
 echo "  visible GPUs:  $CUDA_VISIBLE_DEVICES"
 echo "  resume mode:   $TRAINER_RESUME_MODE"
 echo "  thinking:      enabled"
+echo "  lengths:       prompt=$MAX_PROMPT_LENGTH, train_response=$MAX_RESP_LENGTH, val_response=$MAX_VAL_RESP_LENGTH"
+echo "  sampling:      temperature=$TEMPERATURE, top_p=$TOP_P, top_k=$GENERATION_TOP_K, min_p=$MIN_P"
+echo "  OPD support:   student top-$LOG_PROB_TOP_K ($TOP_K_STRATEGY), n=$N_RESPONSES"
+echo "  token budget:  max_model_len=$MAX_MODEL_LEN, PPO per GPU=$PPO_MAX_TOKEN_LEN_PER_GPU"
+echo "  W&B:           mode=$WANDB_MODE, project=$WANDB_PROJECT"
+echo "  W&B run ID:    persisted in $WANDB_RUN_ID_FILE"
 echo "  checkpoint:    every $TRAINER_SAVE_FREQ steps, keep latest $TRAINER_MAX_ACTOR_CKPT_TO_KEEP"
 
 if [[ ${DRY_RUN:-0} == 1 ]]; then
@@ -184,6 +206,7 @@ mkdir -p \
     "$CKPT_PATH" \
     "$VALIDATION_DIR" \
     "$LOG_DIR" \
+    "$WANDB_DIR" \
     "$OPD_CACHE_ROOT/triton" \
     "$OPD_CACHE_ROOT/torchinductor" \
     "$OPD_CACHE_ROOT/huggingface/datasets" \
@@ -203,6 +226,21 @@ fi
 source "$OPD_ENV/bin/activate"
 cd "$PROJECT_DIR"
 
+# Keep W&B on the same run across process interruption and checkpoint resume.
+# An explicitly supplied WANDB_RUN_ID is accepted only when it matches the ID
+# already associated with this experiment directory.
+if [[ -s "$WANDB_RUN_ID_FILE" ]]; then
+    SAVED_WANDB_RUN_ID=$(<"$WANDB_RUN_ID_FILE")
+    if [[ -n ${WANDB_RUN_ID:-} && "$WANDB_RUN_ID" != "$SAVED_WANDB_RUN_ID" ]]; then
+        echo "WANDB_RUN_ID=$WANDB_RUN_ID conflicts with the saved run ID $SAVED_WANDB_RUN_ID." >&2
+        exit 1
+    fi
+    WANDB_RUN_ID=$SAVED_WANDB_RUN_ID
+else
+    WANDB_RUN_ID=${WANDB_RUN_ID:-$(python -c 'import wandb; print(wandb.util.generate_id())')}
+    printf '%s\n' "$WANDB_RUN_ID" > "$WANDB_RUN_ID_FILE"
+fi
+
 export CUDA_HOME=${CUDA_HOME:-/usr/local/cuda-12.8}
 export PATH="$OPD_ENV/bin:$CUDA_HOME/bin:$PATH"
 export LD_LIBRARY_PATH="$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -218,6 +256,10 @@ export TRITON_CACHE_DIR="$OPD_CACHE_ROOT/triton"
 export TORCHINDUCTOR_CACHE_DIR="$OPD_CACHE_ROOT/torchinductor"
 export FLASHINFER_WORKSPACE_BASE="$OPD_CACHE_ROOT/flashinfer"
 export OUTLINES_CACHE_DIR
+export WANDB_MODE
+export WANDB_DIR
+export WANDB_RUN_ID
+export WANDB_RESUME=${WANDB_RESUME:-allow}
 
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=true
@@ -239,11 +281,10 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "Start time: $(date --iso-8601=seconds)"
 echo "Log file: $LOG_FILE"
+echo "W&B run: project=$WANDB_PROJECT, id=$WANDB_RUN_ID, mode=$WANDB_MODE, resume=$WANDB_RESUME"
 python --version
 python -m pip check
 nvidia-smi --query-gpu=index,name,memory.used,utilization.gpu --format=csv,noheader
-
-MAX_MODEL_LEN=$((MAX_PROMPT_LENGTH + (MAX_RESP_LENGTH > MAX_VAL_RESP_LENGTH ? MAX_RESP_LENGTH : MAX_VAL_RESP_LENGTH)))
 
 python -m verl.trainer.main_ppo \
     "algorithm.adv_estimator=token_reward_direct" \
@@ -285,6 +326,9 @@ python -m verl.trainer.main_ppo \
     "actor_rollout_ref.rollout.name=vllm" \
     "actor_rollout_ref.rollout.enforce_eager=True" \
     "actor_rollout_ref.rollout.temperature=$TEMPERATURE" \
+    "actor_rollout_ref.rollout.top_p=$TOP_P" \
+    "actor_rollout_ref.rollout.top_k=$GENERATION_TOP_K" \
+    "+actor_rollout_ref.rollout.min_p=$MIN_P" \
     "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True" \
     "+actor_rollout_ref.rollout.log_prob_top_k=$LOG_PROB_TOP_K" \
     "+actor_rollout_ref.rollout.top_k_strategy=$TOP_K_STRATEGY" \
@@ -315,7 +359,7 @@ python -m verl.trainer.main_ppo \
     "trainer.val_before_train=False" \
     "trainer.log_val_generations=2" \
     "trainer.logger=$TRAINER_LOGGER" \
-    "trainer.project_name=OnPolicyDistillation" \
+    "trainer.project_name=$WANDB_PROJECT" \
     "trainer.experiment_name=$EXPERIMENT_NAME" \
     "trainer.validation_data_dir=$VALIDATION_DIR" \
     "trainer.n_gpus_per_node=$TRAINER_N_GPUS_PER_NODE" \
@@ -328,7 +372,7 @@ python -m verl.trainer.main_ppo \
     "trainer.default_local_dir=$CKPT_PATH" \
     "trainer.resume_mode=$TRAINER_RESUME_MODE" \
     "trainer.resume_from_path=null" \
-    "trainer.is_plot=True" \
+    "trainer.is_plot=$TRAINER_IS_PLOT" \
     "ray_kwargs.ray_init.num_cpus=64" \
     "+ray_kwargs.ray_init._temp_dir=$RAY_TEMP_DIR"
 
