@@ -20,6 +20,11 @@ MODEL_PATH=${MODEL_PATH:-$OPD_BASE/models/$MODEL_NAME}
 EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$EXPERIMENT_ROOT/evaluation/$MODEL_NAME-thinking-n16}
 ENABLE_THINKING=${ENABLE_THINKING:-1}
 EVAL_GPU_ID=${EVAL_GPU_ID:-${CUDA_VISIBLE_DEVICES:-}}
+TEMPERATURE=${TEMPERATURE:-0.6}
+TOP_P=${TOP_P:-0.95}
+TOP_K=${TOP_K:-20}
+MIN_P=${MIN_P:-0.0}
+MAX_TOKENS=${MAX_TOKENS:-38912}
 
 require_file() {
     if [[ ! -f "$1" ]]; then
@@ -62,7 +67,9 @@ echo "  model path:   $MODEL_PATH"
 echo "  output root:  $EVAL_OUTPUT_ROOT"
 echo "  physical GPU: $EVAL_GPU_ID"
 echo "  thinking:     $ENABLE_THINKING"
-echo "  protocol:     AIME24/AIME25/AMC23, avg@16, temperature=0.7, top_p=0.95"
+echo "  protocol:     AIME24/AIME25/AMC23, avg@16"
+echo "  sampling:     temperature=$TEMPERATURE, top_p=$TOP_P, top_k=$TOP_K, min_p=$MIN_P"
+echo "  max tokens:   $MAX_TOKENS"
 
 if [[ ${DRY_RUN:-0} == 1 ]]; then
     echo "DRY_RUN=1: preflight completed; evaluation was not started."
@@ -131,9 +138,11 @@ GENERATOR_ARGS=(
     --serial
     --model "$MODEL_NAME=$MODEL_PATH"
     --num-samples 16
-    --temperature 0.7
-    --top-p 0.95
-    --max-tokens 31744
+    --temperature "$TEMPERATURE"
+    --top-p "$TOP_P"
+    --top-k "$TOP_K"
+    --min-p "$MIN_P"
+    --max-tokens "$MAX_TOKENS"
 )
 case "$ENABLE_THINKING" in
     1|true|True|TRUE) GENERATOR_ARGS+=(--enable-thinking) ;;
