@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Single-node curriculum OPD launcher for the shared puhui 8 x H800 server.
 #
-# Usage (choose four currently idle physical GPU IDs explicitly):
+# Usage (choose the configured number of currently idle physical GPU IDs explicitly):
 #   CUDA_VISIBLE_DEVICES=0,1,4,5 bash puhui/curriculum-opd stage1
 #   ACTOR_MODEL_PATH=/path/to/merged-stage1 \
 #     CUDA_VISIBLE_DEVICES=0,1,4,5 bash puhui/curriculum-opd stage2
 #   CUDA_VISIBLE_DEVICES=0,1,4,5 bash puhui/curriculum-opd stage3
+#   CUDA_VISIBLE_DEVICES=0,1 bash puhui/curriculum-opd-cudagraph-smoke-2xh800 stage1
 #
 # Each stage consumes the separately merged Hugging Face model from the previous
 # stage. This script trains only; it never merges a checkpoint. Set DRY_RUN=1 to
@@ -14,6 +15,20 @@
 set -euo pipefail
 
 STAGE=${1:-${STAGE:-}}
+SMOKE=${SMOKE:-0}
+SMOKE_STEPS=${SMOKE_STEPS:-1}
+case "$SMOKE" in
+    0|1) ;;
+    *)
+        echo "SMOKE must be 0 or 1; got: $SMOKE" >&2
+        exit 2
+        ;;
+esac
+if [[ ! "$SMOKE_STEPS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "SMOKE_STEPS must be a positive integer; got: $SMOKE_STEPS" >&2
+    exit 2
+fi
+
 case "$STAGE" in
     stage1)
         ACTOR_MODEL_NAME=Qwen3-1.7B
@@ -28,7 +43,7 @@ case "$STAGE" in
         REWARD_MODEL_NAME=Qwen3-14B
         ;;
     *)
-        echo "Usage: CUDA_VISIBLE_DEVICES=<four-idle-GPU-IDs> bash puhui/curriculum-opd {stage1|stage2|stage3}" >&2
+        echo "Usage: CUDA_VISIBLE_DEVICES=<idle-GPU-IDs> bash puhui/curriculum-opd {stage1|stage2|stage3}" >&2
         exit 2
         ;;
 esac
@@ -59,18 +74,38 @@ N_RESPONSES=${N_RESPONSES:-4}
 PARALLEL_SIZE=${PARALLEL_SIZE:-1}
 MODEL_DTYPE=${MODEL_DTYPE:-bfloat16}
 ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.45}
+ROLLOUT_ENFORCE_EAGER=${ROLLOUT_ENFORCE_EAGER:-True}
+CUDAGRAPH_CAPTURE_SIZES=${CUDAGRAPH_CAPTURE_SIZES:-null}
 PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-16384}
 REWARD_MODEL_MICRO_BATCH_SIZE=${REWARD_MODEL_MICRO_BATCH_SIZE:-1}
-TRAINER_N_GPUS_PER_NODE=4
+TRAINER_N_GPUS_PER_NODE=${TRAINER_N_GPUS_PER_NODE:-4}
 TRAINER_NNODES=${TRAINER_NNODES:-1}
-TRAINER_SAVE_FREQ=40
-TRAINER_MAX_ACTOR_CKPT_TO_KEEP=3
-TRAINER_MAX_CRITIC_CKPT_TO_KEEP=3
+TRAINER_SAVE_FREQ=${TRAINER_SAVE_FREQ:-40}
+TRAINER_MAX_ACTOR_CKPT_TO_KEEP=${TRAINER_MAX_ACTOR_CKPT_TO_KEEP:-3}
+TRAINER_MAX_CRITIC_CKPT_TO_KEEP=${TRAINER_MAX_CRITIC_CKPT_TO_KEEP:-3}
 TRAINER_TEST_FREQ=${TRAINER_TEST_FREQ:--1}
 TRAINER_TOTAL_EPOCHS=${TRAINER_TOTAL_EPOCHS:-2}
 TRAINER_RESUME_MODE=${TRAINER_RESUME_MODE:-auto}
 TRAINER_LOGGER=${TRAINER_LOGGER:-'["console","wandb"]'}
 TRAINER_IS_PLOT=${TRAINER_IS_PLOT:-False}
+TRAIN_MAX_SAMPLES=${TRAIN_MAX_SAMPLES:--1}
+TRAINER_TOTAL_TRAINING_STEPS=${TRAINER_TOTAL_TRAINING_STEPS:-null}
+EXPERIMENT_SUFFIX=${EXPERIMENT_SUFFIX:-}
+
+if [[ ! "$TRAINER_N_GPUS_PER_NODE" =~ ^[1-9][0-9]*$ ]]; then
+    echo "TRAINER_N_GPUS_PER_NODE must be a positive integer; got: $TRAINER_N_GPUS_PER_NODE" >&2
+    exit 2
+fi
+
+if [[ "$SMOKE" == 1 ]]; then
+    # Bound the run by complete rollout/reward/backward/optimizer steps. The
+    # wrapper selects the GPU count and rollout sampling multiplicity.
+    TRAIN_MAX_SAMPLES=$((SMOKE_STEPS * MINI_BATCH_SIZE))
+    TRAINER_TOTAL_TRAINING_STEPS=$SMOKE_STEPS
+    TRAINER_SAVE_FREQ=-1
+    TRAINER_RESUME_MODE=disable
+    EXPERIMENT_SUFFIX=${EXPERIMENT_SUFFIX:--smoke}
+fi
 
 TEMPERATURE=${TEMPERATURE:-0.6}
 TOP_P=${TOP_P:-0.95}
@@ -90,7 +125,7 @@ fi
 
 # Include behavior-changing settings in the default run name so auto-resume
 # cannot silently mix this configuration with the earlier 4096-token run.
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-token_reward_direct_${TRAIN_DATASET_NAME}_curriculum-${STAGE}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_r${MAX_RESP_LENGTH}-T${TEMPERATURE}-n${N_RESPONSES}-genk${GENERATION_TOP_K}-topp${TOP_P}-opdk${LOG_PROB_TOP_K}-${TOP_K_STRATEGY}}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-token_reward_direct_${TRAIN_DATASET_NAME}_curriculum-${STAGE}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_r${MAX_RESP_LENGTH}-T${TEMPERATURE}-n${N_RESPONSES}-genk${GENERATION_TOP_K}-topp${TOP_P}-opdk${LOG_PROB_TOP_K}-${TOP_K_STRATEGY}${EXPERIMENT_SUFFIX}}
 CKPT_PATH=$EXPERIMENT_ROOT/checkpoints/$EXPERIMENT_NAME
 VALIDATION_DIR=$EXPERIMENT_ROOT/validation/$EXPERIMENT_NAME
 LOG_DIR=${LOG_DIR:-$EXPERIMENT_ROOT/logs}
@@ -100,8 +135,8 @@ WANDB_PROJECT=${WANDB_PROJECT:-OnPolicyDistillation}
 WANDB_RUN_ID_FILE=${WANDB_RUN_ID_FILE:-$CKPT_PATH/wandb_run_id}
 
 if [[ -z ${CUDA_VISIBLE_DEVICES:-} ]]; then
-    echo "CUDA_VISIBLE_DEVICES must explicitly list four currently idle physical GPU IDs." >&2
-    echo "Example: CUDA_VISIBLE_DEVICES=0,1,4,5 bash puhui/curriculum-opd $STAGE" >&2
+    echo "CUDA_VISIBLE_DEVICES must explicitly list $TRAINER_N_GPUS_PER_NODE currently idle physical GPU IDs." >&2
+    echo "Example: CUDA_VISIBLE_DEVICES=0,1 bash puhui/curriculum-opd-cudagraph-smoke-2xh800 $STAGE" >&2
     exit 2
 fi
 RUN_STAMP=$(date +%Y%m%d_%H%M%S)
@@ -138,6 +173,9 @@ require_file "$OPD_ENV/bin/activate"
 require_hf_model "$ACTOR_MODEL_PATH"
 require_hf_model "$REWARD_MODEL_PATH"
 require_file "$TRAIN_DATASET"
+for task in AIME25 AMC23 AIME24; do
+    require_file "$PROJECT_DIR/datasets/test_data/$task/test.parquet"
+done
 
 IFS=',' read -r -a GPU_IDS <<< "$CUDA_VISIBLE_DEVICES"
 if [[ ${#GPU_IDS[@]} -ne $TRAINER_N_GPUS_PER_NODE ]]; then
@@ -164,6 +202,7 @@ done
 
 echo "Puhui curriculum OPD configuration"
 echo "  stage:         $STAGE"
+echo "  smoke:         $SMOKE"
 echo "  project:       $PROJECT_DIR"
 echo "  environment:   $OPD_ENV"
 echo "  student:       $ACTOR_MODEL_PATH"
@@ -178,9 +217,12 @@ echo "  lengths:       prompt=$MAX_PROMPT_LENGTH, train_response=$MAX_RESP_LENGT
 echo "  sampling:      temperature=$TEMPERATURE, top_p=$TOP_P, top_k=$GENERATION_TOP_K, min_p=$MIN_P"
 echo "  OPD support:   student top-$LOG_PROB_TOP_K ($TOP_K_STRATEGY), n=$N_RESPONSES"
 echo "  token budget:  max_model_len=$MAX_MODEL_LEN, PPO per GPU=$PPO_MAX_TOKEN_LEN_PER_GPU"
+echo "  vLLM graphs:   enforce_eager=$ROLLOUT_ENFORCE_EAGER, capture_sizes=$CUDAGRAPH_CAPTURE_SIZES"
 echo "  W&B:           mode=$WANDB_MODE, project=$WANDB_PROJECT"
 echo "  W&B run ID:    persisted in $WANDB_RUN_ID_FILE"
 echo "  checkpoint:    every $TRAINER_SAVE_FREQ steps, keep latest $TRAINER_MAX_ACTOR_CKPT_TO_KEEP"
+echo "  train samples: $TRAIN_MAX_SAMPLES"
+echo "  total steps:   $TRAINER_TOTAL_TRAINING_STEPS"
 
 if [[ ${DRY_RUN:-0} == 1 ]]; then
     echo "DRY_RUN=1: preflight completed; training was not started."
@@ -292,7 +334,7 @@ python -m verl.trainer.main_ppo \
     "data.shuffle=False" \
     "+data.cache_dir=$OPD_CACHE_ROOT/verl-rlhf" \
     "data.train_files=$TRAIN_DATASET" \
-    "data.train_max_samples=-1" \
+    "data.train_max_samples=$TRAIN_MAX_SAMPLES" \
     "data.val_files=$TEST_DATASET" \
     "data.train_batch_size=$MINI_BATCH_SIZE" \
     "data.max_prompt_length=$MAX_PROMPT_LENGTH" \
@@ -324,7 +366,8 @@ python -m verl.trainer.main_ppo \
     "actor_rollout_ref.ref.fsdp_config.model_dtype=$MODEL_DTYPE" \
     "actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True" \
     "actor_rollout_ref.rollout.name=vllm" \
-    "actor_rollout_ref.rollout.enforce_eager=True" \
+    "actor_rollout_ref.rollout.enforce_eager=$ROLLOUT_ENFORCE_EAGER" \
+    "actor_rollout_ref.rollout.cudagraph_capture_sizes=$CUDAGRAPH_CAPTURE_SIZES" \
     "actor_rollout_ref.rollout.temperature=$TEMPERATURE" \
     "actor_rollout_ref.rollout.top_p=$TOP_P" \
     "actor_rollout_ref.rollout.top_k=$GENERATION_TOP_K" \
@@ -369,6 +412,7 @@ python -m verl.trainer.main_ppo \
     "trainer.max_critic_ckpt_to_keep=$TRAINER_MAX_CRITIC_CKPT_TO_KEEP" \
     "trainer.test_freq=$TRAINER_TEST_FREQ" \
     "trainer.total_epochs=$TRAINER_TOTAL_EPOCHS" \
+    "trainer.total_training_steps=$TRAINER_TOTAL_TRAINING_STEPS" \
     "trainer.default_local_dir=$CKPT_PATH" \
     "trainer.resume_mode=$TRAINER_RESUME_MODE" \
     "trainer.resume_from_path=null" \

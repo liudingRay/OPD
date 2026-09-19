@@ -230,8 +230,8 @@ class vLLMRollout(BaseRollout):
         cudagraph_capture_sizes = config.get("cudagraph_capture_sizes")
         # enforce_eager must be False to use cudagraph
         if not config.enforce_eager and cudagraph_capture_sizes:
-            if isinstance(cudagraph_capture_sizes, ListConfig):
-                compilation_args = {"cudagraph_capture_sizes": cudagraph_capture_sizes}
+            if isinstance(cudagraph_capture_sizes, (list, ListConfig)):
+                compilation_args = {"cudagraph_capture_sizes": list(cudagraph_capture_sizes)}
                 if _use_compilation_mode:
                     compilation_args["mode"] = CompilationMode.VLLM_COMPILE
                 else:

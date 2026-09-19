@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Two-H800 CUDA Graph smoke test for the Puhui curriculum OPD launcher.
+#
+# With train_batch_size=32, n=2, and two rollout workers, each GPU starts
+# with about 32 active generation sequences, matching the largest captured
+# CUDA Graph batch size below. The base launcher still requires two explicitly
+# selected idle physical GPU IDs on this shared server.
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+export SMOKE=1
+export SMOKE_STEPS=${SMOKE_STEPS:-5}
+export TRAINER_N_GPUS_PER_NODE=2
+export N_RESPONSES=2
+export ROLLOUT_ENFORCE_EAGER=False
+export CUDAGRAPH_CAPTURE_SIZES='[1,2,4,8,16,32]'
+export EXPERIMENT_SUFFIX="-cudagraph-smoke-2xh800-fixed-s${SMOKE_STEPS}"
+export WANDB_MODE=${WANDB_MODE:-offline}
+export VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL:-INFO}
+
+exec "$SCRIPT_DIR/curriculum-opd" "$@"
