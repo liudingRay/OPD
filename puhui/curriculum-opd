@@ -110,7 +110,6 @@ fi
 TEMPERATURE=${TEMPERATURE:-0.6}
 TOP_P=${TOP_P:-0.95}
 GENERATION_TOP_K=${GENERATION_TOP_K:-20}
-MIN_P=${MIN_P:-0.0}
 TEACHER_TEMPERATURE=${TEACHER_TEMPERATURE:-1.0}
 REPETITION_PENALTY=${REPETITION_PENALTY:-1.0}
 LOG_PROB_TOP_K=${LOG_PROB_TOP_K:-16}
@@ -214,7 +213,7 @@ echo "  visible GPUs:  $CUDA_VISIBLE_DEVICES"
 echo "  resume mode:   $TRAINER_RESUME_MODE"
 echo "  thinking:      enabled"
 echo "  lengths:       prompt=$MAX_PROMPT_LENGTH, train_response=$MAX_RESP_LENGTH, val_response=$MAX_VAL_RESP_LENGTH"
-echo "  sampling:      temperature=$TEMPERATURE, top_p=$TOP_P, top_k=$GENERATION_TOP_K, min_p=$MIN_P"
+echo "  sampling:      temperature=$TEMPERATURE, top_p=$TOP_P, top_k=$GENERATION_TOP_K"
 echo "  OPD support:   student top-$LOG_PROB_TOP_K ($TOP_K_STRATEGY), n=$N_RESPONSES"
 echo "  token budget:  max_model_len=$MAX_MODEL_LEN, PPO per GPU=$PPO_MAX_TOKEN_LEN_PER_GPU"
 echo "  vLLM graphs:   enforce_eager=$ROLLOUT_ENFORCE_EAGER, capture_sizes=$CUDAGRAPH_CAPTURE_SIZES"
@@ -374,7 +373,6 @@ python -m verl.trainer.main_ppo \
     "actor_rollout_ref.rollout.temperature=$TEMPERATURE" \
     "actor_rollout_ref.rollout.top_p=$TOP_P" \
     "actor_rollout_ref.rollout.top_k=$GENERATION_TOP_K" \
-    "+actor_rollout_ref.rollout.min_p=$MIN_P" \
     "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True" \
     "+actor_rollout_ref.rollout.log_prob_top_k=$LOG_PROB_TOP_K" \
     "+actor_rollout_ref.rollout.top_k_strategy=$TOP_K_STRATEGY" \
