@@ -54,6 +54,16 @@ OPD_ENV=${OPD_ENV:-$OPD_BASE/envs/opd-py312}
 MODEL_ROOT=${MODEL_ROOT:-$OPD_BASE/models}
 OPD_CACHE_ROOT=${OPD_CACHE_ROOT:-$OPD_BASE/cache/opd}
 EXPERIMENT_ROOT=${EXPERIMENT_ROOT:-$OPD_BASE/experiments/OPD}
+WANDB_ENV_FILE=${WANDB_ENV_FILE:-$OPD_BASE/secrets/wandb.env}
+
+# Keep credentials outside the Git checkout. Variables from the optional file
+# are exported so W&B can read WANDB_API_KEY and WANDB_ENTITY directly.
+if [[ -f "$WANDB_ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$WANDB_ENV_FILE"
+    set +a
+fi
 
 # The curriculum labels define run names. The actual model locations remain
 # overridable so a verified merged checkpoint does not need to be copied into
@@ -74,8 +84,8 @@ N_RESPONSES=${N_RESPONSES:-4}
 PARALLEL_SIZE=${PARALLEL_SIZE:-1}
 MODEL_DTYPE=${MODEL_DTYPE:-bfloat16}
 ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.45}
-ROLLOUT_ENFORCE_EAGER=${ROLLOUT_ENFORCE_EAGER:-True}
-CUDAGRAPH_CAPTURE_SIZES=${CUDAGRAPH_CAPTURE_SIZES:-null}
+ROLLOUT_ENFORCE_EAGER=${ROLLOUT_ENFORCE_EAGER:-False}
+CUDAGRAPH_CAPTURE_SIZES=${CUDAGRAPH_CAPTURE_SIZES:-'[1,2,4,8,16,32]'}
 PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-16384}
 REWARD_MODEL_MICRO_BATCH_SIZE=${REWARD_MODEL_MICRO_BATCH_SIZE:-1}
 TRAINER_N_GPUS_PER_NODE=${TRAINER_N_GPUS_PER_NODE:-4}
@@ -217,7 +227,8 @@ echo "  sampling:      temperature=$TEMPERATURE, top_p=$TOP_P, top_k=$GENERATION
 echo "  OPD support:   student top-$LOG_PROB_TOP_K ($TOP_K_STRATEGY), n=$N_RESPONSES"
 echo "  token budget:  max_model_len=$MAX_MODEL_LEN, PPO per GPU=$PPO_MAX_TOKEN_LEN_PER_GPU"
 echo "  vLLM graphs:   enforce_eager=$ROLLOUT_ENFORCE_EAGER, capture_sizes=$CUDAGRAPH_CAPTURE_SIZES"
-echo "  W&B:           mode=$WANDB_MODE, project=$WANDB_PROJECT"
+echo "  W&B:           mode=$WANDB_MODE, entity=${WANDB_ENTITY:-auto}, project=$WANDB_PROJECT"
+echo "  W&B auth:      $([[ -n ${WANDB_API_KEY:-} ]] && echo configured || echo not-configured)"
 echo "  W&B run ID:    persisted in $WANDB_RUN_ID_FILE"
 echo "  checkpoint:    every $TRAINER_SAVE_FREQ steps, keep latest $TRAINER_MAX_ACTOR_CKPT_TO_KEEP"
 echo "  train samples: $TRAIN_MAX_SAMPLES"
@@ -304,6 +315,9 @@ export WANDB_MODE
 export WANDB_DIR
 export WANDB_RUN_ID
 export WANDB_RESUME=${WANDB_RESUME:-allow}
+if [[ -n ${WANDB_ENTITY:-} ]]; then
+    export WANDB_ENTITY
+fi
 
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=true

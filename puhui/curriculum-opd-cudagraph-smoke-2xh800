@@ -16,8 +16,8 @@ export TRAINER_N_GPUS_PER_NODE=2
 export N_RESPONSES=2
 export ROLLOUT_ENFORCE_EAGER=False
 export CUDAGRAPH_CAPTURE_SIZES='[1,2,4,8,16,32]'
-export EXPERIMENT_SUFFIX="-cudagraph-smoke-2xh800-fixed-s${SMOKE_STEPS}"
-export WANDB_MODE=${WANDB_MODE:-offline}
+export EXPERIMENT_SUFFIX=${EXPERIMENT_SUFFIX:-"-cudagraph-online-smoke-2xh800-s${SMOKE_STEPS}"}
+export WANDB_MODE=${WANDB_MODE:-online}
 export VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL:-INFO}
 
 exec "$SCRIPT_DIR/curriculum-opd" "$@"
