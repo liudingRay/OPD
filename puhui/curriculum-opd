@@ -279,7 +279,10 @@ if [[ -s "$WANDB_RUN_ID_FILE" ]]; then
     fi
     WANDB_RUN_ID=$SAVED_WANDB_RUN_ID
 else
-    WANDB_RUN_ID=${WANDB_RUN_ID:-$(python -c 'import wandb; print(wandb.util.generate_id())')}
+    # W&B 0.28.2 removed the legacy wandb.util.generate_id() wrapper. A run
+    # ID may be supplied by the caller, or generated locally without relying
+    # on W&B's private module layout.
+    WANDB_RUN_ID=${WANDB_RUN_ID:-$(python -c 'import secrets; print(secrets.token_hex(4))')}
     printf '%s\n' "$WANDB_RUN_ID" > "$WANDB_RUN_ID_FILE"
 fi
 
