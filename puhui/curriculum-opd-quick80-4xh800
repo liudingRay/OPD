@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Four-H800 quick effectiveness run for curriculum OPD.
+#
+# The current DAPO-Math-17K parquet contains 17,917 rows. Select 14,336
+# examples (80.01%, aligned to train_batch_size=32) with a fixed random seed.
+# With two epochs, this produces 448 steps per epoch and 896 steps total.
+# This is a real resumable training run, not a smoke test.
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+export SMOKE=0
+export TRAINER_N_GPUS_PER_NODE=4
+export N_RESPONSES=2
+export TRAIN_MAX_SAMPLES=14336
+export DATA_SHUFFLE=True
+export DATA_SEED=42
+export TRAINER_TOTAL_EPOCHS=2
+export ROLLOUT_ENFORCE_EAGER=False
+export CUDAGRAPH_CAPTURE_SIZES='[1,2,4,8,16,32]'
+export WANDB_MODE=online
+export EXPERIMENT_SUFFIX=${EXPERIMENT_SUFFIX:-'-quick80-seed42-4xh800'}
+
+exec "$SCRIPT_DIR/curriculum-opd" "$@"

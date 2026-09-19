@@ -99,6 +99,8 @@ TRAINER_RESUME_MODE=${TRAINER_RESUME_MODE:-auto}
 TRAINER_LOGGER=${TRAINER_LOGGER:-'["console","wandb"]'}
 TRAINER_IS_PLOT=${TRAINER_IS_PLOT:-False}
 TRAIN_MAX_SAMPLES=${TRAIN_MAX_SAMPLES:--1}
+DATA_SHUFFLE=${DATA_SHUFFLE:-False}
+DATA_SEED=${DATA_SEED:-null}
 TRAINER_TOTAL_TRAINING_STEPS=${TRAINER_TOTAL_TRAINING_STEPS:-null}
 EXPERIMENT_SUFFIX=${EXPERIMENT_SUFFIX:-}
 
@@ -232,6 +234,7 @@ echo "  W&B auth:      $([[ -n ${WANDB_API_KEY:-} ]] && echo configured || echo 
 echo "  W&B run ID:    persisted in $WANDB_RUN_ID_FILE"
 echo "  checkpoint:    every $TRAINER_SAVE_FREQ steps, keep latest $TRAINER_MAX_ACTOR_CKPT_TO_KEEP"
 echo "  train samples: $TRAIN_MAX_SAMPLES"
+echo "  data order:    shuffle=$DATA_SHUFFLE, seed=$DATA_SEED"
 echo "  total steps:   $TRAINER_TOTAL_TRAINING_STEPS"
 
 if [[ ${DRY_RUN:-0} == 1 ]]; then
@@ -347,7 +350,8 @@ nvidia-smi --query-gpu=index,name,memory.used,utilization.gpu --format=csv,nohea
 python -m verl.trainer.main_ppo \
     "algorithm.adv_estimator=token_reward_direct" \
     "algorithm.grpo_outcome_weight=1.0" \
-    "data.shuffle=False" \
+    "data.shuffle=$DATA_SHUFFLE" \
+    "data.seed=$DATA_SEED" \
     "+data.cache_dir=$OPD_CACHE_ROOT/verl-rlhf" \
     "data.train_files=$TRAIN_DATASET" \
     "data.train_max_samples=$TRAIN_MAX_SAMPLES" \
