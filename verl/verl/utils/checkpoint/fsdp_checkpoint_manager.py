@@ -15,6 +15,7 @@
 import json
 import logging
 import os
+import re
 import warnings
 from dataclasses import asdict, dataclass
 from typing import Optional
@@ -198,6 +199,32 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         if local_path is None:
             return
 
+        configured_protected_steps = (
+            self.checkpoint_config.get("protected_global_steps", []) if self.checkpoint_config else []
+        )
+        protected_global_steps = {int(step) for step in (configured_protected_steps or [])}
+
+        def checkpoint_step(path: str) -> Optional[int]:
+            match = re.search(r"(?:^|/)global_step_(\d+)(?:/|$)", os.path.normpath(path))
+            return int(match.group(1)) if match else None
+
+        # Rebuild rank 0's retention view after a Slurm resume. The upstream
+        # in-memory list starts empty in every new process, which otherwise
+        # prevents max_ckpt_to_keep from rotating checkpoints saved by an
+        # earlier allocation.
+        if self.rank == 0 and not self.previous_saved_paths:
+            checkpoint_root = os.path.dirname(os.path.dirname(os.path.normpath(local_path)))
+            existing_paths = []
+            if os.path.isdir(checkpoint_root):
+                for entry in os.scandir(checkpoint_root):
+                    actor_path = os.path.join(entry.path, os.path.basename(local_path))
+                    if entry.is_dir() and checkpoint_step(entry.path) is not None and os.path.isdir(actor_path):
+                        existing_paths.append(actor_path)
+            self.previous_saved_paths = sorted(
+                (path for path in existing_paths if os.path.normpath(path) != os.path.normpath(local_path)),
+                key=lambda path: checkpoint_step(path) or -1,
+            )
+
         # record the previous global step
         self.previous_global_step = global_step
 
@@ -207,11 +234,17 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             and max_ckpt_to_keep
             and isinstance(max_ckpt_to_keep, int)
             and max_ckpt_to_keep > 0
-            and len(self.previous_saved_paths) >= max_ckpt_to_keep
+            and global_step not in protected_global_steps
         ):
-            keep_start = len(self.previous_saved_paths) - max_ckpt_to_keep + 1
-            self.remove_previous_save_local_path(self.previous_saved_paths[:keep_start])
-            self.previous_saved_paths = self.previous_saved_paths[keep_start:]
+            rotating_paths = [
+                path for path in self.previous_saved_paths if checkpoint_step(path) not in protected_global_steps
+            ]
+            if len(rotating_paths) >= max_ckpt_to_keep:
+                remove_count = len(rotating_paths) - max_ckpt_to_keep + 1
+                paths_to_remove = rotating_paths[:remove_count]
+                self.remove_previous_save_local_path(paths_to_remove)
+                removed = set(paths_to_remove)
+                self.previous_saved_paths = [path for path in self.previous_saved_paths if path not in removed]
 
         local_path = local_mkdir_safe(local_path)
         torch.distributed.barrier()

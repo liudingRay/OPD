@@ -31,11 +31,13 @@ class CheckpointConfig(BaseConfig):
             Options: 'model', 'optimizer', 'extra', 'hf_model'.
         load_contents (list[str]): Contents to load from checkpoint. Defaults to same as save_contents.
         async_save (bool): Whether to save checkpoints asynchronously. Only implemented for Megatron as of now.
+        protected_global_steps (list[int]): Checkpoint steps excluded from normal retention rotation.
     """
 
     save_contents: list[str] = field(default_factory=lambda: ["model", "optimizer", "extra"])
     load_contents: list[str] = field(default_factory=lambda: ["model", "optimizer", "extra"])
     async_save: bool = False
+    protected_global_steps: list[int] = field(default_factory=list)
 
 
 @dataclass
