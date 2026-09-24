@@ -81,8 +81,8 @@ TRAINER_RESUME_MODE=${TRAINER_RESUME_MODE:-auto}
 TRAINER_LOGGER=${TRAINER_LOGGER:-'["console","wandb"]'}
 TRAINER_IS_PLOT=${TRAINER_IS_PLOT:-False}
 TRAIN_MAX_SAMPLES=${TRAIN_MAX_SAMPLES:--1}
-DATA_SHUFFLE=${DATA_SHUFFLE:-False}
-DATA_SEED=${DATA_SEED:-null}
+DATA_SHUFFLE=${DATA_SHUFFLE:-True}
+DATA_SEED=${DATA_SEED:-42}
 TRAINER_TOTAL_TRAINING_STEPS=${TRAINER_TOTAL_TRAINING_STEPS:-null}
 SBATCH_TIME=24:00:00
 SBATCH_GPUS=4
@@ -214,8 +214,11 @@ if [[ ${SLURM_NNODES:-0} -ne 2 ]]; then
     exit 1
 fi
 
+# Conda activation hooks may read unset variables such as ADDR2LINE.
+set +u
 source "$CONDA_BASE/etc/profile.d/conda.sh"
 conda activate "$OPD_ENV"
+set -u
 cd "$PROJECT_DIR"
 
 JOB_TMP_ROOT=/tmp/${SLURM_JOB_ID}.opd
