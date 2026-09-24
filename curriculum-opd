@@ -432,7 +432,7 @@ srun --overlap --nodes="$TRAINER_NNODES" --ntasks="$TRAINER_NNODES" --ntasks-per
     nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
 '
 srun --overlap --nodes=1 --ntasks=1 -w "$HEAD_NODE" \
-    python -m verl.trainer.main_ppo \
+    env -u ROCR_VISIBLE_DEVICES python -m verl.trainer.main_ppo \
     "algorithm.adv_estimator=token_reward_direct" \
     "algorithm.grpo_outcome_weight=1.0" \
     "data.shuffle=$DATA_SHUFFLE" \
