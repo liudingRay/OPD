@@ -80,7 +80,7 @@ TRAINER_TOTAL_EPOCHS=${TRAINER_TOTAL_EPOCHS:-2}
 TRAINER_RESUME_MODE=${TRAINER_RESUME_MODE:-auto}
 TRAINER_LOGGER=${TRAINER_LOGGER:-'["console","wandb"]'}
 TRAINER_IS_PLOT=${TRAINER_IS_PLOT:-False}
-TRAIN_MAX_SAMPLES=${TRAIN_MAX_SAMPLES:--1}
+TRAIN_MAX_SAMPLES=${TRAIN_MAX_SAMPLES:-14336}
 DATA_SHUFFLE=${DATA_SHUFFLE:-True}
 DATA_SEED=${DATA_SEED:-42}
 TRAINER_TOTAL_TRAINING_STEPS=${TRAINER_TOTAL_TRAINING_STEPS:-null}
@@ -90,6 +90,30 @@ SBATCH_CPUS=32
 EXPERIMENT_SUFFIX=${EXPERIMENT_SUFFIX:-}
 
 TRAINER_N_GPUS_PER_NODE=$SBATCH_GPUS
+
+# Single-GPU, one-step smoke test in an existing interactive allocation.
+# Reduce batch/length only for this test; isolate it from resumable main runs.
+SMOKE=${SMOKE:-0}
+if [[ "$SMOKE" == 1 ]]; then
+    TRAINER_NNODES=1
+    TRAINER_N_GPUS_PER_NODE=1
+    SBATCH_GPUS=1
+    SBATCH_CPUS=8
+    SBATCH_TIME=01:00:00
+    MINI_BATCH_SIZE=1
+    MAX_RESP_LENGTH=512
+    MAX_VAL_RESP_LENGTH=512
+    PPO_MAX_TOKEN_LEN_PER_GPU=2048
+    TRAIN_MAX_SAMPLES=8
+    TRAINER_TOTAL_TRAINING_STEPS=1
+    TRAINER_SAVE_FREQ=-1
+    TRAINER_RESUME_MODE=disable
+    ROLLOUT_GPU_MEMORY_UTILIZATION=0.25
+    EXPERIMENT_SUFFIX="-smoke-1gpu-${SLURM_JOB_ID:-new}"
+elif [[ "$SMOKE" != 0 ]]; then
+    echo "SMOKE must be 0 or 1." >&2
+    exit 2
+fi
 
 TEMPERATURE=${TEMPERATURE:-0.6}
 TOP_P=${TOP_P:-0.95}
@@ -163,7 +187,7 @@ print_configuration() {
     echo "  experiment:    $EXPERIMENT_NAME"
     echo "  checkpoints:   $CKPT_PATH"
     echo "  validation:    $VALIDATION_DIR"
-    echo "  resources:     2 nodes, $SBATCH_GPUS x A100 per node, $SBATCH_CPUS CPUs, time=$SBATCH_TIME"
+    echo "  resources:     $TRAINER_NNODES nodes, $SBATCH_GPUS x A100 per node, $SBATCH_CPUS CPUs, time=$SBATCH_TIME"
     echo "  resume mode:   $TRAINER_RESUME_MODE"
     echo "  thinking:      enabled"
     echo "  lengths:       prompt=$MAX_PROMPT_LENGTH, train_response=$MAX_RESP_LENGTH, val_response=$MAX_VAL_RESP_LENGTH"
@@ -200,6 +224,8 @@ if [[ -z ${SLURM_JOB_ID:-} ]]; then
     SCRIPT_PATH=$(realpath "$0")
     exec sbatch \
         --export=ALL \
+        --nodes="$TRAINER_NNODES" \
+        --ntasks="$TRAINER_NNODES" \
         --time="$SBATCH_TIME" \
         --gres="gpu:a100:$SBATCH_GPUS" \
         --cpus-per-task="$SBATCH_CPUS" \
@@ -209,8 +235,8 @@ if [[ -z ${SLURM_JOB_ID:-} ]]; then
         "$SCRIPT_PATH" "$STAGE"
 fi
 
-if [[ ${SLURM_NNODES:-0} -ne 2 ]]; then
-    echo "Expected two allocated nodes, got SLURM_NNODES=${SLURM_NNODES:-unset}." >&2
+if [[ ${SLURM_NNODES:-0} -ne "$TRAINER_NNODES" ]]; then
+    echo "Expected $TRAINER_NNODES allocated nodes, got SLURM_NNODES=${SLURM_NNODES:-unset}." >&2
     exit 1
 fi
 
@@ -355,6 +381,11 @@ echo "Log file: $LOG_FILE"
 echo "W&B run: project=$WANDB_PROJECT, id=$WANDB_RUN_ID, mode=$WANDB_MODE, resume=$WANDB_RESUME"
 mapfile -t NODES < <(scontrol show hostnames "$SLURM_JOB_NODELIST")
 HEAD_NODE=${NODES[0]}
+RAY_INIT_ARGS=("ray_kwargs.ray_init.num_cpus=null")
+if [[ "$SMOKE" == 1 ]]; then
+    unset RAY_ADDRESS
+    RAY_INIT_ARGS=("ray_kwargs.ray_init.num_cpus=$SBATCH_CPUS" "+ray_kwargs.ray_init._temp_dir=$RAY_TEMP_DIR")
+else
 HEAD_IP=$(srun --nodes=1 --ntasks=1 -w "$HEAD_NODE" hostname --ip-address)
 
 if [[ "$HEAD_IP" == *" "* ]]; then
@@ -391,10 +422,11 @@ for ((NODE_INDEX = 1; NODE_INDEX < ${#NODES[@]}; NODE_INDEX++)); do
         --num-gpus=4 --block &
     sleep 5
 done
-
+RAY_INIT_ARGS+=("+ray_kwargs.ray_init.address=$RAY_ADDRESS")
+fi
 
 # Check both allocated nodes using the activated Leonardo environment.
-srun --overlap --nodes=2 --ntasks=2 --ntasks-per-node=1 bash -c '
+srun --overlap --nodes="$TRAINER_NNODES" --ntasks="$TRAINER_NNODES" --ntasks-per-node=1 bash -ec '
     python --version
     python -m pip check
     nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
@@ -490,8 +522,7 @@ srun --overlap --nodes=1 --ntasks=1 -w "$HEAD_NODE" \
     "trainer.resume_mode=$TRAINER_RESUME_MODE" \
     "trainer.resume_from_path=null" \
     "trainer.is_plot=$TRAINER_IS_PLOT" \
-    "ray_kwargs.ray_init.num_cpus=null" \
-    "+ray_kwargs.ray_init.address=$RAY_ADDRESS" &
+    "${RAY_INIT_ARGS[@]}" &
 
 # A background driver lets Bash process USR1 immediately during training.
 # wait can be interrupted by the trap; keep waiting for the actual driver exit.
