@@ -108,7 +108,8 @@ if [[ "$SMOKE" == 1 ]]; then
     TRAINER_TOTAL_TRAINING_STEPS=1
     TRAINER_SAVE_FREQ=-1
     TRAINER_RESUME_MODE=disable
-    ROLLOUT_GPU_MEMORY_UTILIZATION=0.25
+    # Keep the configured vLLM budget (default 0.45). A smaller hard-coded
+    # budget can leave no KV cache after colocated model memory is profiled.
     EXPERIMENT_SUFFIX="-smoke-1gpu-${SLURM_JOB_ID:-new}"
 elif [[ "$SMOKE" != 0 ]]; then
     echo "SMOKE must be 0 or 1." >&2
