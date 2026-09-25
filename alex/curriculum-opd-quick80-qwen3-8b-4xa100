@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Four-A100 quick-80 curriculum OPD run. The requested stage selects the
+# student and teacher through the main curriculum launcher. W&B stays offline
+# on Alex.
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+export SMOKE=0
+export N_RESPONSES=2
+export TRAIN_MAX_SAMPLES=14336
+export DATA_SHUFFLE=True
+export DATA_SEED=42
+export TRAINER_TOTAL_EPOCHS=2
+export TRAINER_SAVE_FREQ=50
+export TRAINER_MAX_ACTOR_CKPT_TO_KEEP=3
+export TRAINER_MAX_CRITIC_CKPT_TO_KEEP=3
+export TRAINER_PROTECTED_CHECKPOINT_STEPS='[200,400,600]'
+export TRAINER_RESUME_MODE=auto
+export ROLLOUT_ENFORCE_EAGER=False
+export CUDAGRAPH_CAPTURE_SIZES='[1,2,4,8,16,32]'
+export WANDB_MODE=offline
+export EXPERIMENT_SUFFIX=${EXPERIMENT_SUFFIX:-'-quick80-seed42-4xa100'}
+
+exec "$SCRIPT_DIR/curriculum-opd" "$@"
