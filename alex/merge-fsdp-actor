@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# Merge one verl FSDP actor checkpoint into a standalone Hugging Face model.
+#
+# Supported submission interface (run on an Alex login node):
+#
+#   bash alex/merge-fsdp-actor
+#   RUN_DIR=... EXPECTED_STEP=... MERGED_MODEL_NAME=... bash alex/merge-fsdp-actor
+#
+# The login-node invocation validates the selected checkpoint and refuses to
+# overwrite an existing model before submitting this same file through sbatch.
+
+#SBATCH --job-name=merge-fsdp-actor
+#SBATCH --partition=a100
+#SBATCH --constraint=a100_80
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:a100:1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=00:10:00
+
+set -euo pipefail
+
+if [[ -z ${OPD_WS:-} ]]; then
+    if ! command -v ws_find >/dev/null 2>&1; then
+        echo "ws_find is unavailable. Run this launcher on Alex or set OPD_WS explicitly." >&2
+        exit 1
+    fi
+    OPD_WS=$(ws_find opd)
+fi
+
+PROJECT_DIR=${PROJECT_DIR:-$OPD_WS/OPD}
+OPD_ENV=${OPD_ENV:-$OPD_WS/envs/opd-py312}
+MODEL_ROOT=${MODEL_ROOT:-$OPD_WS/models}
+EXPERIMENT_ROOT=${EXPERIMENT_ROOT:-$OPD_WS/experiments/OPD}
+LOG_DIR=${LOG_DIR:-$EXPERIMENT_ROOT/logs}
+
+# Defaults select the completed Qwen3-1.7B <- Qwen3-8B quick-80 checkpoint.
+# Override all three variables together for another training run.
+RUN_DIR=${RUN_DIR:-$EXPERIMENT_ROOT/checkpoints/token_reward_direct_DAPO-Math-17k_curriculum-stage1_Qwen3-1.7B_Qwen3-8B_r15360-T0.6-n2-genk20-topp0.95-opdk16-only_stu-quick80-seed42-4xa100}
+EXPECTED_STEP=${EXPECTED_STEP:-300}
+MERGED_MODEL_NAME=${MERGED_MODEL_NAME:-Qwen3-1.7B-OPD-8B-quick80-step300}
+
+ACTOR_CKPT="$RUN_DIR/global_step_${EXPECTED_STEP}/actor"
+MERGED_DIR=${MERGED_DIR:-$MODEL_ROOT/$MERGED_MODEL_NAME}
+TRACKER="$RUN_DIR/latest_checkpointed_iteration.txt"
+
+require_file() {
+    if [[ ! -f "$1" ]]; then
+        echo "Required file is missing: $1" >&2
+        exit 1
+    fi
+}
+
+require_dir() {
+    if [[ ! -d "$1" ]]; then
+        echo "Required directory is missing: $1" >&2
+        exit 1
+    fi
+}
+
+require_dir "$PROJECT_DIR"
+require_file "$OPD_ENV/bin/activate"
+require_dir "$RUN_DIR"
+require_file "$TRACKER"
+require_dir "$ACTOR_CKPT"
+require_file "$ACTOR_CKPT/fsdp_config.json"
+require_file "$ACTOR_CKPT/huggingface/config.json"
+
+RECORDED_STEP=$(tr -d '[:space:]' < "$TRACKER")
+if [[ "$RECORDED_STEP" != "$EXPECTED_STEP" ]]; then
+    echo "Refusing to merge: tracker records global_step_${RECORDED_STEP}, expected global_step_${EXPECTED_STEP}." >&2
+    exit 1
+fi
+
+if [[ -e "$MERGED_DIR" ]]; then
+    echo "Refusing to overwrite existing merge target: $MERGED_DIR" >&2
+    exit 1
+fi
+
+echo "Alex FSDP merge configuration"
+echo "  run directory:   $RUN_DIR"
+echo "  expected step:   $EXPECTED_STEP"
+echo "  actor checkpoint:$ACTOR_CKPT"
+echo "  model name:      $MERGED_MODEL_NAME"
+echo "  merged model:    $MERGED_DIR"
+echo "  resources:       1 x A100-80GB, 16 CPUs, time=00:10:00"
+
+if [[ ${DRY_RUN:-0} == 1 ]]; then
+    echo "DRY_RUN=1: preflight completed; no Slurm job was submitted."
+    exit 0
+fi
+
+if [[ -z ${SLURM_JOB_ID:-} ]]; then
+    mkdir -p "$LOG_DIR"
+    export OPD_WS PROJECT_DIR OPD_ENV MODEL_ROOT EXPERIMENT_ROOT LOG_DIR
+    export RUN_DIR EXPECTED_STEP MERGED_MODEL_NAME ACTOR_CKPT MERGED_DIR TRACKER
+    SCRIPT_PATH=$(realpath "$0")
+    exec sbatch \
+        --export=ALL \
+        --job-name="merge-${MERGED_MODEL_NAME}" \
+        --output="$LOG_DIR/%x-%j.out" \
+        --error="$LOG_DIR/%x-%j.err" \
+        "$SCRIPT_PATH"
+fi
+
+module purge
+module load cuda/12.8.1
+
+source "$OPD_ENV/bin/activate"
+cd "$PROJECT_DIR/verl"
+
+export PYTHONPATH="$PROJECT_DIR/verl${PYTHONPATH:+:$PYTHONPATH}"
+export TOKENIZERS_PARALLELISM=false
+
+STAGING_DIR="$MODEL_ROOT/.${MERGED_MODEL_NAME}.merge-${SLURM_JOB_ID}"
+if [[ -e "$STAGING_DIR" ]]; then
+    echo "Unexpected existing staging directory: $STAGING_DIR" >&2
+    exit 1
+fi
+
+python - "$ACTOR_CKPT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+actor_checkpoint = Path(sys.argv[1])
+world_size = json.loads((actor_checkpoint / "fsdp_config.json").read_text())["world_size"]
+missing = [
+    actor_checkpoint / f"model_world_size_{world_size}_rank_{rank}.pt"
+    for rank in range(world_size)
+    if not (actor_checkpoint / f"model_world_size_{world_size}_rank_{rank}.pt").is_file()
+]
+if missing:
+    raise SystemExit("Missing FSDP actor shard(s):\n" + "\n".join(map(str, missing)))
+print(f"Verified {world_size} FSDP actor shard(s).")
+PY
+
+echo "Start time: $(date --iso-8601=seconds)"
+echo "Slurm job: $SLURM_JOB_ID on $SLURM_JOB_NODELIST"
+
+python -m verl.model_merger merge \
+    --backend fsdp \
+    --local_dir "$ACTOR_CKPT" \
+    --target_dir "$STAGING_DIR"
+
+require_file "$STAGING_DIR/config.json"
+if ! compgen -G "$STAGING_DIR/model*.safetensors" >/dev/null; then
+    echo "Merge finished without Hugging Face model safetensors in: $STAGING_DIR" >&2
+    exit 1
+fi
+
+mv "$STAGING_DIR" "$MERGED_DIR"
+
+echo "End time: $(date --iso-8601=seconds)"
+echo "Merged model is ready: $MERGED_DIR"
+du -sh "$MERGED_DIR"
+find "$MERGED_DIR" -maxdepth 1 -type f -printf '%f\n' | sort

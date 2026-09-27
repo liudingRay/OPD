@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+# Evaluate one local Qwen3 model on Alex with avg@N.
+#
+# Supported submission interface (run on an Alex login node):
+#
+#   bash alex/eval-qwen3-model-1xa100
+#   MODEL_NAME=... MODEL_PATH=... bash alex/eval-qwen3-model-1xa100
+#
+# The login-node invocation validates all inputs before submitting this same
+# file through sbatch. It never overwrites existing generation files unless
+# EVAL_OVERWRITE=1 is set explicitly.
+
+#SBATCH --job-name=eval-qwen3-model
+#SBATCH --partition=a100
+#SBATCH --constraint=a100_80
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:a100:1
+#SBATCH --cpus-per-task=8
+#SBATCH --time=24:00:00
+
+set -euo pipefail
+
+if [[ -z ${OPD_WS:-} ]]; then
+    if ! command -v ws_find >/dev/null 2>&1; then
+        echo "ws_find is unavailable. Run this launcher on Alex or set OPD_WS explicitly." >&2
+        exit 1
+    fi
+    OPD_WS=$(ws_find opd)
+fi
+
+PROJECT_DIR=${PROJECT_DIR:-$OPD_WS/OPD}
+OPD_ENV=${OPD_ENV:-$OPD_WS/envs/opd-py312}
+MODEL_ROOT=${MODEL_ROOT:-$OPD_WS/models}
+EXPERIMENT_ROOT=${EXPERIMENT_ROOT:-$OPD_WS/experiments/OPD}
+OPD_CACHE_ROOT=${OPD_CACHE_ROOT:-$OPD_WS/.cache/opd}
+
+# Override these two variables together when evaluating another model. A
+# unique MODEL_NAME also gives the run an independent output directory.
+MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B-OPD-8B-quick80-step300}
+MODEL_PATH=${MODEL_PATH:-$MODEL_ROOT/$MODEL_NAME}
+
+ENABLE_THINKING=${ENABLE_THINKING:-1}
+TASKS=${TASKS:-"AIME24 AIME25 AMC23"}
+NUM_SAMPLES=${NUM_SAMPLES:-16}
+TEMPERATURE=${TEMPERATURE:-0.6}
+TOP_P=${TOP_P:-0.95}
+TOP_K=${TOP_K:-20}
+MIN_P=${MIN_P:-0.0}
+MAX_TOKENS=${MAX_TOKENS:-38912}
+EVAL_OVERWRITE=${EVAL_OVERWRITE:-0}
+
+case "$ENABLE_THINKING" in
+    0|1) ;;
+    *)
+        echo "ENABLE_THINKING must be 0 or 1; got: $ENABLE_THINKING" >&2
+        exit 2
+        ;;
+esac
+case "$EVAL_OVERWRITE" in
+    0|1) ;;
+    *)
+        echo "EVAL_OVERWRITE must be 0 or 1; got: $EVAL_OVERWRITE" >&2
+        exit 2
+        ;;
+esac
+
+THINKING_LABEL=nonthinking
+if [[ "$ENABLE_THINKING" == 1 ]]; then
+    THINKING_LABEL=thinking
+fi
+
+EVAL_PROTOCOL_LABEL=${EVAL_PROTOCOL_LABEL:-puhui-t${TEMPERATURE}-p${TOP_P}-topk${TOP_K}-minp${MIN_P}-mnt${MAX_TOKENS}}
+EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$EXPERIMENT_ROOT/evaluation/$MODEL_NAME-$THINKING_LABEL-$EVAL_PROTOCOL_LABEL-n$NUM_SAMPLES}
+LOG_DIR=${LOG_DIR:-$EXPERIMENT_ROOT/logs}
+
+require_file() {
+    if [[ ! -f "$1" ]]; then
+        echo "Required file is missing: $1" >&2
+        exit 1
+    fi
+}
+
+require_dir() {
+    if [[ ! -d "$1" ]]; then
+        echo "Required directory is missing: $1" >&2
+        exit 1
+    fi
+}
+
+require_dir "$PROJECT_DIR"
+require_file "$OPD_ENV/bin/activate"
+require_dir "$MODEL_PATH"
+require_file "$MODEL_PATH/config.json"
+if ! compgen -G "$MODEL_PATH/model*.safetensors" >/dev/null; then
+    echo "Hugging Face model weights are missing from: $MODEL_PATH" >&2
+    exit 1
+fi
+for task in $TASKS; do
+    case "$task" in
+        AIME24|AIME25|AMC23) ;;
+        *)
+            echo "Unsupported task: $task (supported: AIME24 AIME25 AMC23)" >&2
+            exit 2
+            ;;
+    esac
+    require_file "$PROJECT_DIR/scripts/val/data/$task/test.parquet"
+done
+require_file "$PROJECT_DIR/scripts/val/eval/eval_baselines.py"
+require_file "$PROJECT_DIR/scripts/val/eval/grade.py"
+require_file "$PROJECT_DIR/scripts/val/eval/summarize_baseline_results.py"
+
+echo "Alex Qwen3 evaluation configuration"
+echo "  model name:      $MODEL_NAME"
+echo "  model path:      $MODEL_PATH"
+echo "  output root:     $EVAL_OUTPUT_ROOT"
+echo "  tasks:           $TASKS"
+echo "  thinking:        $ENABLE_THINKING"
+echo "  samples:         $NUM_SAMPLES"
+echo "  sampling:        temperature=$TEMPERATURE, top_p=$TOP_P, top_k=$TOP_K, min_p=$MIN_P"
+echo "  max tokens:      $MAX_TOKENS"
+echo "  overwrite:       $EVAL_OVERWRITE"
+echo "  resources:       1 x A100-80GB, 8 CPUs, time=24:00:00"
+
+if [[ ${DRY_RUN:-0} == 1 ]]; then
+    echo "DRY_RUN=1: preflight completed; no Slurm job was submitted."
+    exit 0
+fi
+
+if [[ -z ${SLURM_JOB_ID:-} ]]; then
+    mkdir -p "$LOG_DIR"
+    export OPD_WS PROJECT_DIR OPD_ENV MODEL_ROOT EXPERIMENT_ROOT OPD_CACHE_ROOT
+    export MODEL_NAME MODEL_PATH ENABLE_THINKING TASKS NUM_SAMPLES
+    export TEMPERATURE TOP_P TOP_K MIN_P MAX_TOKENS EVAL_OVERWRITE
+    export EVAL_PROTOCOL_LABEL
+    export EVAL_OUTPUT_ROOT LOG_DIR
+    SCRIPT_PATH=$(realpath "$0")
+    exec sbatch \
+        --export=ALL \
+        --output="$LOG_DIR/%x-%j.out" \
+        --error="$LOG_DIR/%x-%j.err" \
+        "$SCRIPT_PATH"
+fi
+
+module purge
+module load cuda/12.8.1
+
+source "$OPD_ENV/bin/activate"
+cd "$PROJECT_DIR"
+
+CUDA_HOME=${CUDA_HOME:-$(dirname "$(dirname "$(command -v nvcc)")")}
+JOB_TMP_ROOT=${TMPDIR:-/tmp/${SLURM_JOB_ID}.alex-eval}
+OUTLINES_CACHE_DIR=${OUTLINES_CACHE_DIR:-$OPD_CACHE_ROOT/outlines/eval-$MODEL_NAME-$SLURM_JOB_ID}
+
+mkdir -p \
+    "$EVAL_OUTPUT_ROOT" \
+    "$LOG_DIR" \
+    "$OPD_CACHE_ROOT/triton" \
+    "$OPD_CACHE_ROOT/torchinductor" \
+    "$OPD_CACHE_ROOT/torch-extensions" \
+    "$OPD_CACHE_ROOT/huggingface/datasets" \
+    "$OPD_CACHE_ROOT/huggingface/hub" \
+    "$OPD_CACHE_ROOT/flashinfer-workspace" \
+    "$OPD_CACHE_ROOT/vllm-config" \
+    "$OPD_CACHE_ROOT/vllm-cache" \
+    "$OPD_CACHE_ROOT/xdg-config" \
+    "$OPD_CACHE_ROOT/xdg-cache" \
+    "$OUTLINES_CACHE_DIR" \
+    "$JOB_TMP_ROOT"
+
+export CUDA_HOME
+export PATH="$OPD_ENV/bin:$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export PYTHONPATH="$PROJECT_DIR/verl${PYTHONPATH:+:$PYTHONPATH}"
+export TMPDIR="$JOB_TMP_ROOT"
+export HF_HOME="$OPD_CACHE_ROOT/huggingface"
+export HF_DATASETS_CACHE="$HF_HOME/datasets"
+export HF_HUB_CACHE="$HF_HOME/hub"
+export TRITON_CACHE_DIR="$OPD_CACHE_ROOT/triton"
+export TORCHINDUCTOR_CACHE_DIR="$OPD_CACHE_ROOT/torchinductor"
+export TORCH_EXTENSIONS_DIR="$OPD_CACHE_ROOT/torch-extensions"
+export FLASHINFER_WORKSPACE_BASE="$OPD_CACHE_ROOT/flashinfer-workspace"
+export VLLM_CONFIG_ROOT="$OPD_CACHE_ROOT/vllm-config"
+export VLLM_CACHE_ROOT="$OPD_CACHE_ROOT/vllm-cache"
+export XDG_CONFIG_HOME="$OPD_CACHE_ROOT/xdg-config"
+export XDG_CACHE_HOME="$OPD_CACHE_ROOT/xdg-cache"
+export OUTLINES_CACHE_DIR
+export VLLM_NO_USAGE_STATS=1
+export VLLM_DO_NOT_TRACK=1
+export DO_NOT_TRACK=1
+export TOKENIZERS_PARALLELISM=true
+export PYTHONUNBUFFERED=1
+unset ROCR_VISIBLE_DEVICES
+
+echo "Start time: $(date --iso-8601=seconds)"
+echo "Slurm job: $SLURM_JOB_ID on $SLURM_JOB_NODELIST"
+python --version
+python -m pip check
+nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu --format=csv,noheader
+
+cd "$PROJECT_DIR/scripts/val/eval"
+read -r -a TASK_ARGS <<< "$TASKS"
+GENERATOR_ARGS=(
+    --model-root "$MODEL_ROOT"
+    --data-dir "$PROJECT_DIR/scripts/val/data"
+    --output-root "$EVAL_OUTPUT_ROOT"
+    --gpu-ids 0
+    --serial
+    --model "$MODEL_NAME=$MODEL_PATH"
+    --tasks "${TASK_ARGS[@]}"
+    --num-samples "$NUM_SAMPLES"
+    --temperature "$TEMPERATURE"
+    --top-p "$TOP_P"
+    --top-k "$TOP_K"
+    --min-p "$MIN_P"
+    --max-tokens "$MAX_TOKENS"
+)
+if [[ "$ENABLE_THINKING" == 1 ]]; then
+    GENERATOR_ARGS+=(--enable-thinking)
+fi
+if [[ "$EVAL_OVERWRITE" == 1 ]]; then
+    GENERATOR_ARGS+=(--overwrite)
+fi
+
+python eval_baselines.py "${GENERATOR_ARGS[@]}"
+
+python grade.py \
+    --eval-dir "$EVAL_OUTPUT_ROOT/$MODEL_NAME" \
+    --length-tokenizer "$MODEL_PATH"
+
+python summarize_baseline_results.py --output-root "$EVAL_OUTPUT_ROOT"
+
+echo "End time: $(date --iso-8601=seconds)"
+echo "Evaluation results: $EVAL_OUTPUT_ROOT"

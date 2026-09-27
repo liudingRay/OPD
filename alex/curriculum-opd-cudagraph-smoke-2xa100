@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Two-A100 CUDA Graph smoke test for the Alex curriculum OPD launcher.
+#
+# With train_batch_size=32, n=2, and two rollout workers, each GPU starts
+# with about 32 active generation sequences, matching the largest captured
+# CUDA Graph batch size below.
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+export SMOKE=1
+export SMOKE_STEPS=${SMOKE_STEPS:-5}
+export SMOKE_GPUS=2
+export SMOKE_CPUS=16
+export SMOKE_TIME=${SMOKE_TIME:-02:00:00}
+export N_RESPONSES=2
+export ROLLOUT_ENFORCE_EAGER=False
+export CUDAGRAPH_CAPTURE_SIZES='[1,2,4,8,16,32]'
+export EXPERIMENT_SUFFIX="-cudagraph-smoke-2xa100-fixed-s${SMOKE_STEPS}"
+export WANDB_MODE=${WANDB_MODE:-offline}
+export VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL:-INFO}
+
+exec "$SCRIPT_DIR/curriculum-opd" "$@"

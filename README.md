@@ -67,11 +67,13 @@ pip install -r requirements/metrics.txt
 
 #### OPD
 
-Use the following command to start on-policy distillation:
+The original on-policy distillation wrapper is retained as a legacy reference under `leonardo/`:
 
 ```bash
-bash on_policy_distillation.sh
+bash leonardo/on_policy_distillation.sh
 ```
+
+The current Stage-1/2/3 experiments use the server-specific `curriculum-opd` launchers instead.
 
 <details>
 <summary><b>Key Parameters</b></summary>
@@ -144,7 +146,7 @@ We release the resulting SFT checkpoint [Qwen3-1.7B-SFT](https://huggingface.co/
 
 #### RL (GRPO)
 
-We use GRPO as the RL algorithm. To enable RL, set `ADV_ESTIMATOR=grpo` and `LOG_PROB_TOP_K=0`. A reference script `grpo.sh` is provided.
+We use GRPO as the RL algorithm. To enable RL, set `ADV_ESTIMATOR=grpo` and `LOG_PROB_TOP_K=0`. The older reference script is retained as `leonardo/grpo.sh`; its original Slurm directives are not a current Leonardo configuration.
 
 We release the resulting RL checkpoint [Qwen3-4B-Base-GRPO](https://huggingface.co/lllyx/Qwen3-4B-Base-GRPO), which is obtained by zero RL from `Qwen3-4B-Base`.
 
