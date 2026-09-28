@@ -4,7 +4,9 @@
 # Login-node interface: bash alex/eval-curriculum-overlap
 # Preflight only: DRY_RUN=1 bash alex/eval-curriculum-overlap
 # No training, backward pass, checkpoint merging, or output replacement.
-# Model paths use the confirmed Alex layout; all six remain overridable.
+# PAIR_SET=all evaluates the three stage-final pairs. PAIR_SET=curriculum_starts
+# evaluates only the Stage-2 and Stage-3 starting checkpoints against their new
+# teachers. Model paths use the confirmed Alex layout and remain overridable.
 
 #SBATCH --job-name=eval-curriculum-overlap
 #SBATCH --partition=a100
@@ -33,7 +35,7 @@ EXPERIMENT_ROOT=${EXPERIMENT_ROOT:-$OPD_WS/experiments/OPD}
 OPD_CACHE_ROOT=${OPD_CACHE_ROOT:-$OPD_WS/.cache/opd}
 DATA_DIR=${DATA_DIR:-$PROJECT_DIR/scripts/val/data}
 LOG_DIR=${LOG_DIR:-$EXPERIMENT_ROOT/logs}
-OVERLAP_OUTPUT_ROOT=${OVERLAP_OUTPUT_ROOT:-$EXPERIMENT_ROOT/evaluation/curriculum-overlap-fixed}
+PAIR_SET=${PAIR_SET:-all}
 
 # Export at submission so the allocation uses the same selected model paths.
 STAGE1_MODEL_PATH=${STAGE1_MODEL_PATH:-$MODEL_ROOT/Qwen3-1.7B-OPD-4B}
@@ -42,6 +44,39 @@ STAGE3_MODEL_PATH=${STAGE3_MODEL_PATH:-$MODEL_ROOT/Qwen3-1.7B-OPD-4B-8B-14B}
 TEACHER4B_PATH=${TEACHER4B_PATH:-$MODEL_ROOT/Qwen3-4B}
 TEACHER8B_PATH=${TEACHER8B_PATH:-$MODEL_ROOT/Qwen3-8B}
 TEACHER14B_PATH=${TEACHER14B_PATH:-$MODEL_ROOT/Qwen3-14B}
+STAGE2_START_MODEL_PATH=${STAGE2_START_MODEL_PATH:-$MODEL_ROOT/Qwen3-1.7B-OPD-4B-quick80-step280}
+STAGE3_START_MODEL_PATH=${STAGE3_START_MODEL_PATH:-$MODEL_ROOT/Qwen3-1.7B-OPD-4B-8B-quick80-step280}
+
+case "$PAIR_SET" in
+    all)
+        DEFAULT_OUTPUT_NAME=curriculum-overlap-fixed
+        PAIR_ARGS=(
+            --pair "stage1=$STAGE1_MODEL_PATH,$TEACHER4B_PATH"
+            --pair "stage2=$STAGE2_MODEL_PATH,$TEACHER8B_PATH"
+            --pair "stage3=$STAGE3_MODEL_PATH,$TEACHER14B_PATH"
+        )
+        MODELS_TO_VALIDATE=(
+            "$STAGE1_MODEL_PATH" "$STAGE2_MODEL_PATH" "$STAGE3_MODEL_PATH"
+            "$TEACHER4B_PATH" "$TEACHER8B_PATH" "$TEACHER14B_PATH"
+        )
+        ;;
+    curriculum_starts)
+        DEFAULT_OUTPUT_NAME=curriculum-overlap-fixed-stage-starts
+        PAIR_ARGS=(
+            --pair "stage2_start=$STAGE2_START_MODEL_PATH,$TEACHER8B_PATH"
+            --pair "stage3_start=$STAGE3_START_MODEL_PATH,$TEACHER14B_PATH"
+        )
+        MODELS_TO_VALIDATE=(
+            "$STAGE2_START_MODEL_PATH" "$STAGE3_START_MODEL_PATH"
+            "$TEACHER8B_PATH" "$TEACHER14B_PATH"
+        )
+        ;;
+    *)
+        echo "PAIR_SET must be all or curriculum_starts; got: $PAIR_SET" >&2
+        exit 2
+        ;;
+esac
+OVERLAP_OUTPUT_ROOT=${OVERLAP_OUTPUT_ROOT:-$EXPERIMENT_ROOT/evaluation/$DEFAULT_OUTPUT_NAME}
 
 QUESTIONS_PER_TASK=${QUESTIONS_PER_TASK:-5}
 SEED=${SEED:-42}
@@ -56,8 +91,7 @@ require_file() {
 }
 require_file "$OPD_ENV/bin/activate"
 require_file "$PROJECT_DIR/scripts/val/eval/eval_fixed_overlap.py"
-for model in "$STAGE1_MODEL_PATH" "$STAGE2_MODEL_PATH" "$STAGE3_MODEL_PATH" \
-             "$TEACHER4B_PATH" "$TEACHER8B_PATH" "$TEACHER14B_PATH"; do
+for model in "${MODELS_TO_VALIDATE[@]}"; do
     [[ "$model" == /* ]] || { echo "Model path must be absolute: $model" >&2; exit 1; }
     require_file "$model/config.json"
     if ! compgen -G "$model/model*.safetensors" >/dev/null; then
@@ -74,9 +108,7 @@ if [[ -e "$OVERLAP_OUTPUT_ROOT" ]]; then
 fi
 
 ARGS=(
-    --pair "stage1=$STAGE1_MODEL_PATH,$TEACHER4B_PATH"
-    --pair "stage2=$STAGE2_MODEL_PATH,$TEACHER8B_PATH"
-    --pair "stage3=$STAGE3_MODEL_PATH,$TEACHER14B_PATH"
+    "${PAIR_ARGS[@]}"
     --data-dir "$DATA_DIR" --output-root "$OVERLAP_OUTPUT_ROOT"
     --questions-per-task "$QUESTIONS_PER_TASK" --seed "$SEED"
     --max-tokens "$MAX_TOKENS" --temperature "$TEMPERATURE" --top-p "$TOP_P"
@@ -119,7 +151,8 @@ if [[ -z ${SLURM_JOB_ID:-} || ${DRY_RUN:-0} == 1 ]]; then
     fi
     mkdir -p "$LOG_DIR"
     export OPD_WS PROJECT_DIR OPD_ENV MODEL_ROOT EXPERIMENT_ROOT OPD_CACHE_ROOT DATA_DIR LOG_DIR
-    export OVERLAP_OUTPUT_ROOT STAGE1_MODEL_PATH STAGE2_MODEL_PATH STAGE3_MODEL_PATH
+    export PAIR_SET OVERLAP_OUTPUT_ROOT STAGE1_MODEL_PATH STAGE2_MODEL_PATH STAGE3_MODEL_PATH
+    export STAGE2_START_MODEL_PATH STAGE3_START_MODEL_PATH
     export TEACHER4B_PATH TEACHER8B_PATH TEACHER14B_PATH
     export QUESTIONS_PER_TASK SEED MAX_TOKENS TEMPERATURE TOP_P GENERATION_TOP_K SCORE_CHUNK_SIZE
     exec sbatch --export=ALL --output="$LOG_DIR/%x-%j.out" --error="$LOG_DIR/%x-%j.err" "$(realpath "$0")"

@@ -199,6 +199,19 @@ and token counts. `SCORE_CHUNK_SIZE=128` controls forward-pass memory only.
 The shared file `scripts/val/eval/eval_fixed_overlap.py` must be present on Alex.
 Logs are saved to `experiments/OPD/logs/eval-curriculum-overlap-<job-id>.out/.err`.
 
+To measure only the two curriculum transition points, submit:
+
+```bash
+PAIR_SET=curriculum_starts bash alex/eval-curriculum-overlap
+```
+
+This mode evaluates `Qwen3-1.7B-OPD-4B-quick80-step280` against Qwen3-8B
+(the Stage-2 start) and `Qwen3-1.7B-OPD-4B-8B-quick80-step280` against
+Qwen3-14B (the Stage-3 start). It uses the same fixed questions and metrics,
+writes to `evaluation/curriculum-overlap-fixed-stage-starts`, and validates only
+the four models needed by these two pairs. Override `STAGE2_START_MODEL_PATH` or
+`STAGE3_START_MODEL_PATH` when testing other transition checkpoints.
+
 ## Operational behavior
 
 - All behavior-changing training controls are inherited from the puhui
