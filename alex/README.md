@@ -164,6 +164,41 @@ generation files are reused; set `EVAL_OVERWRITE=1` only when they should be
 regenerated deliberately. Use `DRY_RUN=1` to print and validate the complete
 configuration without submitting a job.
 
+## Fixed-question curriculum overlap evaluation
+
+Use the same shared evaluator as `puhui/eval-curriculum-overlap`:
+
+```bash
+cd "$(ws_find opd)/OPD"
+bash alex/eval-curriculum-overlap
+```
+
+The launcher validates inputs on the login node before submitting one A100-80GB,
+8 CPUs, and 24 hours. `DRY_RUN=1 bash alex/eval-curriculum-overlap` performs only
+the CPU preflight and does not submit a job. The default final students are
+`models/Qwen3-1.7B-OPD-4B`, `models/Qwen3-1.7B-OPD-4B-8B`, and
+`models/Qwen3-1.7B-OPD-4B-8B-14B`, paired with `models/Qwen3-4B`,
+`models/Qwen3-8B`, and `models/Qwen3-14B`, respectively, under `$(ws_find opd)`.
+Override `STAGE1_MODEL_PATH`, `STAGE2_MODEL_PATH`, `STAGE3_MODEL_PATH`,
+`TEACHER4B_PATH`, `TEACHER8B_PATH`, or `TEACHER14B_PATH` for other verified paths.
+
+The settings match Puhui: five fixed questions per AIME24/AIME25/AMC23 (`SEED=42`),
+one thinking response per question, `MAX_TOKENS=38912`, temperature 0.6, top-p
+0.95, generation top-k 20, and diagnostic k=4/8/16. This is forward-only;
+there is no training or backward pass. Each student generates its own trajectory,
+and its teacher scores those same prefixes; this is not a fixed-prefix comparison
+across all students or a start/middle/end checkpoint sweep.
+
+Results go to `$(ws_find opd)/experiments/OPD/evaluation/curriculum-overlap-fixed`.
+An existing output directory is rejected; set a new `OVERLAP_OUTPUT_ROOT` for a
+repeat run. Outputs include `samples.json`, generated token IDs, per-token
+metrics, `summary.md/csv/json`, and `summary_chunks.md/csv/json` using the original
+1024-response-token bins. Chunk reports include both all-valid-position overlap
+mass and the legacy nonempty-intersection mass mean, plus contributing question
+and token counts. `SCORE_CHUNK_SIZE=128` controls forward-pass memory only.
+The shared file `scripts/val/eval/eval_fixed_overlap.py` must be present on Alex.
+Logs are saved to `experiments/OPD/logs/eval-curriculum-overlap-<job-id>.out/.err`.
+
 ## Operational behavior
 
 - All behavior-changing training controls are inherited from the puhui
