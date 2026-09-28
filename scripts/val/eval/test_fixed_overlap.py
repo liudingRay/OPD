@@ -111,6 +111,36 @@ class OverlapTests(unittest.TestCase):
         with self.assertRaises(Exception):
             overlap.parse_pair("../escape=/student,/teacher")
 
+    def test_trajectory_reuse_requires_earlier_exact_student(self):
+        pairs = [
+            {"label": "base4", "student": "/student", "teacher": "/teacher4"},
+            {"label": "base8", "student": "/student", "teacher": "/teacher8"},
+        ]
+        overlap.apply_trajectory_reuse(pairs, [overlap.parse_reuse_spec("base8=base4")])
+        self.assertEqual(pairs[1]["trajectory_source"], "base4")
+        with self.assertRaises(ValueError):
+            overlap.apply_trajectory_reuse(pairs, [("base4", "base8")])
+        different = [
+            {"label": "a", "student": "/student-a", "teacher": "/teacher4"},
+            {"label": "b", "student": "/student-b", "teacher": "/teacher8"},
+        ]
+        with self.assertRaises(ValueError):
+            overlap.apply_trajectory_reuse(different, [("b", "a")])
+
+    def test_copy_reused_student_outputs_excludes_teacher_scores(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source, target = root / "base4", root / "base8"
+            source.mkdir(); target.mkdir()
+            for name in ("trajectories.json", "trajectory-000.json", "student-topk-000.npz",
+                         "teacher-topk-000.npz", "overlap-k4-000.npz"):
+                (source / name).write_bytes(name.encode())
+            overlap.copy_reused_student_outputs(root, {"label": "base8", "trajectory_source": "base4"})
+            self.assertEqual(
+                sorted(path.name for path in target.iterdir()),
+                ["student-topk-000.npz", "trajectories.json", "trajectory-000.json"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

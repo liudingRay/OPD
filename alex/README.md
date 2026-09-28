@@ -212,6 +212,19 @@ writes to `evaluation/curriculum-overlap-fixed-stage-starts`, and validates only
 the four models needed by these two pairs. Override `STAGE2_START_MODEL_PATH` or
 `STAGE3_START_MODEL_PATH` when testing other transition checkpoints.
 
+To compare the unchanged official Qwen3-1.7B student with all three teachers:
+
+```bash
+PAIR_SET=official_student_teachers bash alex/eval-curriculum-overlap
+```
+
+This mode generates the fixed trajectories once with `models/Qwen3-1.7B`,
+computes its student logits once, and evaluates Qwen3-4B, Qwen3-8B, and
+Qwen3-14B on those exact same prefixes. The output directory is
+`evaluation/official-qwen3-1p7b-overlap-fixed-teachers`. This reuse makes the
+teacher-scale comparison prefix controlled and avoids two redundant student
+generation/scoring passes. Override `OFFICIAL_STUDENT_PATH` if necessary.
+
 ## Operational behavior
 
 - All behavior-changing training controls are inherited from the puhui

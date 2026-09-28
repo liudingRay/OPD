@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Fixed-question, on-policy overlap diagnostics (not an accuracy evaluation).
 
-Each pair generates its own trajectories. Both models then score exactly those
-token prefixes with untempered, full-vocabulary-normalized probabilities.
+Each pair normally generates its own trajectories. Pairs that share an exact
+student can explicitly reuse a prior pair's trajectories and student scores.
+Both models then score exactly those token prefixes with untempered,
+full-vocabulary-normalized probabilities.
 Generation and each scoring model run in separate processes to release VRAM.
 Only response predictions are measured, including generated EOS if present.
 Outputs never overwrite an existing run directory. No training is performed.
@@ -19,6 +21,7 @@ import math
 import os
 from pathlib import Path
 import random
+import shutil
 import subprocess
 import sys
 
@@ -275,8 +278,13 @@ def summarize(config, root):
         writer = csv.DictWriter(handle, fieldnames=list(summaries[0]))
         writer.writeheader()
         writer.writerows(summaries)
-    lines = ["# Fixed-question overlap diagnostics", "",
-             "Each student generated its own trajectory; teacher and student scored identical prefixes within each pair.",
+    has_reuse = any(pair.get("trajectory_source") for pair in config["pairs"])
+    trajectory_note = (
+        "Pairs with trajectory_source reused the exact source trajectories and student scores; all teachers scored "
+        "those identical prefixes." if has_reuse else
+        "Each student generated its own trajectory; teacher and student scored identical prefixes within each pair."
+    )
+    lines = ["# Fixed-question overlap diagnostics", "", trajectory_note,
              "These are different teacher/student pairs, not a within-stage training trend or an accuracy benchmark.",
              "Mass uses raw full-vocabulary probabilities at temperature 1, without sampling filters or top-k renormalization.",
              "Token means weight long answers more; question means weight each question equally. EOS is included if generated.",
@@ -351,6 +359,46 @@ def parse_pair(value):
         raise argparse.ArgumentTypeError("Use LABEL=/absolute/student,/absolute/teacher") from error
 
 
+def parse_reuse_spec(value):
+    try:
+        label, source = value.split("=", 1)
+        safe = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+        if not label or not source or any(c not in safe for c in label + source):
+            raise ValueError("unsafe label")
+        return label, source
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("Use LABEL=EARLIER_LABEL") from error
+
+
+def apply_trajectory_reuse(pairs, specs):
+    """Validate and record exact trajectory/student-score reuse dependencies."""
+    by_label = {pair["label"]: pair for pair in pairs}
+    positions = {pair["label"]: index for index, pair in enumerate(pairs)}
+    for label, source in specs or []:
+        if label not in by_label or source not in by_label:
+            raise ValueError(f"Unknown trajectory reuse label: {label}={source}")
+        if label == source or positions[source] >= positions[label]:
+            raise ValueError(f"Trajectory source must precede its target: {label}={source}")
+        if "trajectory_source" in by_label[label]:
+            raise ValueError(f"Duplicate trajectory reuse target: {label}")
+        if by_label[label]["student"] != by_label[source]["student"]:
+            raise ValueError(f"Trajectory reuse requires the exact same student path: {label}={source}")
+        by_label[label]["trajectory_source"] = source
+
+
+def copy_reused_student_outputs(root, pair):
+    """Copy immutable trajectories and student logits from an earlier pair."""
+    source = root / pair["trajectory_source"]
+    target = root / pair["label"]
+    required = [source / "trajectories.json", *sorted(source.glob("trajectory-*.json")),
+                *sorted(source.glob("student-topk-*.npz"))]
+    if not required or any(not path.is_file() for path in required):
+        raise ValueError(f"Incomplete trajectory source: {source}")
+    for path in required:
+        shutil.copy2(path, target / path.name)
+    print(f"{pair['label']} reused trajectories and student scores from {pair['trajectory_source']}", flush=True)
+
+
 def main():
     # Internal workers consume the immutable run config written by the parent.
     if len(sys.argv) > 1 and sys.argv[1] == "_worker":
@@ -364,6 +412,9 @@ def main():
         return
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pair", type=parse_pair, action="append", required=True)
+    parser.add_argument("--reuse-trajectories", type=parse_reuse_spec, action="append", default=[],
+                        metavar="LABEL=EARLIER_LABEL",
+                        help="Reuse exact trajectories and student top-k scores from an earlier pair with the same student.")
     parser.add_argument("--data-dir", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--questions-per-task", type=int, required=True)
@@ -378,6 +429,10 @@ def main():
     args = parser.parse_args()
     if len({p["label"] for p in args.pair}) != len(args.pair):
         parser.error("Pair labels must be unique")
+    try:
+        apply_trajectory_reuse(args.pair, args.reuse_trajectories)
+    except ValueError as error:
+        parser.error(str(error))
     if min(args.questions_per_task, args.max_tokens, args.score_chunk_size, *args.ks) < 1:
         parser.error("Counts and diagnostic k must be positive")
     if (not math.isfinite(args.temperature) or args.temperature < 0 or not 0 < args.top_p <= 1
@@ -406,7 +461,15 @@ def main():
     write_json(args.output_root / "config.json", config)
     for pair in config["pairs"]:
         (args.output_root / pair["label"]).mkdir()
-        for phase in ("generate", "student", "teacher"):
+        if pair.get("trajectory_source"):
+            source_pair = next(p for p in config["pairs"] if p["label"] == pair["trajectory_source"])
+            if pair["tokenizer_sha256"] != source_pair["tokenizer_sha256"]:
+                raise ValueError("Trajectory reuse tokenizer mismatch")
+            copy_reused_student_outputs(args.output_root, pair)
+            phases = ("teacher",)
+        else:
+            phases = ("generate", "student", "teacher")
+        for phase in phases:
             subprocess.run([sys.executable, str(Path(__file__).resolve()), "_worker",
                             str((args.output_root / "config.json").resolve()), pair["label"], phase], check=True)
     summarize(config, args.output_root)

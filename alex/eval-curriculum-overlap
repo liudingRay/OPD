@@ -6,7 +6,9 @@
 # No training, backward pass, checkpoint merging, or output replacement.
 # PAIR_SET=all evaluates the three stage-final pairs. PAIR_SET=curriculum_starts
 # evaluates only the Stage-2 and Stage-3 starting checkpoints against their new
-# teachers. Model paths use the confirmed Alex layout and remain overridable.
+# teachers. PAIR_SET=official_student_teachers compares one official 1.7B
+# trajectory set with all three teachers. Model paths use the confirmed Alex
+# layout and remain overridable.
 
 #SBATCH --job-name=eval-curriculum-overlap
 #SBATCH --partition=a100
@@ -46,6 +48,7 @@ TEACHER8B_PATH=${TEACHER8B_PATH:-$MODEL_ROOT/Qwen3-8B}
 TEACHER14B_PATH=${TEACHER14B_PATH:-$MODEL_ROOT/Qwen3-14B}
 STAGE2_START_MODEL_PATH=${STAGE2_START_MODEL_PATH:-$MODEL_ROOT/Qwen3-1.7B-OPD-4B-quick80-step280}
 STAGE3_START_MODEL_PATH=${STAGE3_START_MODEL_PATH:-$MODEL_ROOT/Qwen3-1.7B-OPD-4B-8B-quick80-step280}
+OFFICIAL_STUDENT_PATH=${OFFICIAL_STUDENT_PATH:-$MODEL_ROOT/Qwen3-1.7B}
 
 case "$PAIR_SET" in
     all)
@@ -71,8 +74,21 @@ case "$PAIR_SET" in
             "$TEACHER8B_PATH" "$TEACHER14B_PATH"
         )
         ;;
+    official_student_teachers)
+        DEFAULT_OUTPUT_NAME=official-qwen3-1p7b-overlap-fixed-teachers
+        PAIR_ARGS=(
+            --pair "official_1p7b_vs_4b=$OFFICIAL_STUDENT_PATH,$TEACHER4B_PATH"
+            --pair "official_1p7b_vs_8b=$OFFICIAL_STUDENT_PATH,$TEACHER8B_PATH"
+            --pair "official_1p7b_vs_14b=$OFFICIAL_STUDENT_PATH,$TEACHER14B_PATH"
+            --reuse-trajectories "official_1p7b_vs_8b=official_1p7b_vs_4b"
+            --reuse-trajectories "official_1p7b_vs_14b=official_1p7b_vs_4b"
+        )
+        MODELS_TO_VALIDATE=(
+            "$OFFICIAL_STUDENT_PATH" "$TEACHER4B_PATH" "$TEACHER8B_PATH" "$TEACHER14B_PATH"
+        )
+        ;;
     *)
-        echo "PAIR_SET must be all or curriculum_starts; got: $PAIR_SET" >&2
+        echo "PAIR_SET must be all, curriculum_starts, or official_student_teachers; got: $PAIR_SET" >&2
         exit 2
         ;;
 esac
@@ -153,6 +169,7 @@ if [[ -z ${SLURM_JOB_ID:-} || ${DRY_RUN:-0} == 1 ]]; then
     export OPD_WS PROJECT_DIR OPD_ENV MODEL_ROOT EXPERIMENT_ROOT OPD_CACHE_ROOT DATA_DIR LOG_DIR
     export PAIR_SET OVERLAP_OUTPUT_ROOT STAGE1_MODEL_PATH STAGE2_MODEL_PATH STAGE3_MODEL_PATH
     export STAGE2_START_MODEL_PATH STAGE3_START_MODEL_PATH
+    export OFFICIAL_STUDENT_PATH
     export TEACHER4B_PATH TEACHER8B_PATH TEACHER14B_PATH
     export QUESTIONS_PER_TASK SEED MAX_TOKENS TEMPERATURE TOP_P GENERATION_TOP_K SCORE_CHUNK_SIZE
     exec sbatch --export=ALL --output="$LOG_DIR/%x-%j.out" --error="$LOG_DIR/%x-%j.err" "$(realpath "$0")"
