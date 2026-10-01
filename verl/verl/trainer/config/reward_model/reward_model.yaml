@@ -12,6 +12,16 @@ enable_resource_pool: False
 n_gpus_per_node: 0
 nnodes: 0
 
+# Optional causal-LM teacher ensemble. When set, every model scores the same
+# student trajectory and the final dimension of the returned score tensor
+# indexes teachers. teacher_weights are normalized before aggregation.
+model_paths: null
+teacher_names: null
+teacher_weights: null
+teacher_weight_mode: fixed
+teacher_ema_beta: 0.9
+teacher_selection_tau: 0.1
+
 # FSDP strategy: "fsdp" or "fsdp2"
 strategy: ???
 

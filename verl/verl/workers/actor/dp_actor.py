@@ -31,6 +31,7 @@ from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
+from verl.utils.multi_teacher import compute_weighted_teacher_rewards, trajectory_ln_weights
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
@@ -510,7 +511,12 @@ class DataParallelPPOActor(BasePPOActor):
         device = get_device_id()
         S_ids = data.batch["student_top_k_ids"].to(device)
         S_logp = data.batch["student_top_k_log_probs"].to(device)
-        T_on_S = data.batch["teacher_on_student_log_probs"].to(device)
+        T_on_S = data.batch.get("teacher_on_student_log_probs", None)
+        if T_on_S is not None:
+            T_on_S = T_on_S.to(device)
+        T_on_S_by_teacher = data.batch.get("teacher_on_student_log_probs_by_teacher", None)
+        if T_on_S_by_teacher is not None:
+            T_on_S_by_teacher = T_on_S_by_teacher.to(device)
         
         T_ids = data.batch.get("teacher_top_k_ids", None)
         if T_ids is not None: T_ids = T_ids.to(device)
@@ -558,10 +564,52 @@ class DataParallelPPOActor(BasePPOActor):
         res_tensors = {}
         
         if strategy == "only_stu":
-            kl_val = S_logp - T_on_S
             valid_mask = torch.ones_like(S_logp, dtype=torch.bool)
-            norm_weights = compute_reward_weights(S_logp, T_on_S, valid_mask, reward_weight_mode)
-            rm_scores = -kl_val * norm_weights
+            if T_on_S_by_teacher is not None:
+                if reward_weight_mode != "student_p":
+                    raise ValueError("Multi-teacher only_stu currently requires reward_weight_mode=student_p")
+                teacher_weights = data.meta_info.get("teacher_weights", None)
+                if teacher_weights is None:
+                    raise ValueError("teacher_weights is required for multi-teacher distillation")
+
+                mode = data.meta_info.get("teacher_weight_mode", "fixed")
+                if mode == "ln_softmax":
+                    dynamic_weights, diagnostics = trajectory_ln_weights(
+                        S_logp, T_on_S_by_teacher,
+                        data.batch["teacher_overlap_mask_by_teacher"].to(device),
+                        data.batch["response_mask"].to(device),
+                        beta=data.meta_info["teacher_ema_beta"],
+                        tau=data.meta_info["teacher_selection_tau"],
+                    )
+                    teacher_weights = dynamic_weights.unsqueeze(-2)
+                    # Padding must not inject NaNs into reward summaries or advantages.
+                    response_valid = data.batch["response_mask"].to(device).bool()
+                    S_logp = S_logp.masked_fill(~response_valid[..., None], 0.0)
+                    T_on_S_by_teacher = T_on_S_by_teacher.masked_fill(~response_valid[..., None, None], 0.0)
+                    for key, value in diagnostics.items():
+                        res_tensors[f"dynamic_teacher_{key}"] = value
+                elif mode != "fixed":
+                    raise ValueError(f"Unknown teacher_weight_mode: {mode}")
+
+                norm_weights = compute_reward_weights(S_logp, S_logp, valid_mask, reward_weight_mode)
+                rm_scores, rewards_by_teacher = compute_weighted_teacher_rewards(
+                    S_logp,
+                    T_on_S_by_teacher,
+                    norm_weights,
+                    teacher_weights,
+                )
+
+                response_mask = data.batch["response_mask"].to(device)
+                expanded_mask = response_mask.unsqueeze(-1).unsqueeze(-1).expand_as(rewards_by_teacher)
+                res_tensors["teacher_reward_sums"] = (rewards_by_teacher * expanded_mask).sum(dim=(1, 2))
+                response_counts = response_mask.sum(dim=1, keepdim=True).to(rewards_by_teacher.dtype)
+                res_tensors["teacher_reward_counts"] = response_counts.expand(-1, rewards_by_teacher.shape[-1])
+            else:
+                if T_on_S is None:
+                    raise ValueError("Teacher log probabilities are missing for only_stu distillation")
+                kl_val = S_logp - T_on_S
+                norm_weights = compute_reward_weights(S_logp, T_on_S, valid_mask, reward_weight_mode)
+                rm_scores = -kl_val * norm_weights
             
         elif strategy == "only_tch":
             kl_val = S_on_T - T_logp

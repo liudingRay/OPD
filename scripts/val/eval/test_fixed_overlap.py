@@ -14,11 +14,87 @@ SPEC.loader.exec_module(overlap)
 
 
 class OverlapTests(unittest.TestCase):
+    def test_repeated_response_ids_seeds_and_question_mean(self):
+        samples = [
+            {"uid": "AIME24:1", "task": "AIME24", "question": "q1"},
+            {"uid": "AIME24:2", "task": "AIME24", "question": "q2"},
+        ]
+        expanded = overlap.expand_response_samples(samples, 4, 42)
+        self.assertEqual(len(expanded), 8)
+        self.assertEqual([row["seed"] for row in expanded], list(range(42, 50)))
+        self.assertEqual(len({row["uid"] for row in expanded}), 8)
+        self.assertEqual({row["question_uid"] for row in expanded}, {"AIME24:1", "AIME24:2"})
+        rows = [
+            {"uid": "a:1", "question_uid": "a", "value": 1.0},
+            {"uid": "a:2", "question_uid": "a", "value": 3.0},
+            {"uid": "b:1", "question_uid": "b", "value": 10.0},
+        ]
+        self.assertEqual(overlap._question_mean(rows, "value"), 6.0)
+
     def test_mass_is_not_renormalized_or_shared_between_models(self):
         result = overlap.token_overlap([0, 1], [.6, .2], [1, 2], [.5, .3], 2)
         np.testing.assert_allclose(result, [.5, .2, .5])
         self.assertEqual(overlap.token_overlap([0], [.9], [1], [.8], 1), (0, 0, 0))
         np.testing.assert_allclose(overlap.token_overlap([0], [.9], [0], [.8], 1), [1, .9, .8])
+
+    def test_topk_mechanism_metrics_distinguish_sparse_shared_and_exact(self):
+        student_ids = np.asarray([[0, 1], [0, 1]])
+        student_probs = np.asarray([[.6, .2], [.7, .1]])
+        teacher_ids = np.asarray([[0, 2], [2, 3]])
+        teacher_probs = np.asarray([[.5, .3], [.6, .2]])
+        teacher_on_student = np.log(np.asarray([[.5, .1], [.05, .02]]))
+        result = overlap.topk_mechanism_metrics(
+            student_ids, student_probs, teacher_ids, teacher_probs, 2, teacher_on_student
+        )
+        expected_cosine = .6 * .5 / np.sqrt((.6 ** 2 + .2 ** 2) * (.5 ** 2 + .3 ** 2))
+        self.assertAlmostEqual(result["sparse_union_cosine"][0], expected_cosine)
+        self.assertEqual(result["sparse_union_cosine"][1], 0)
+        self.assertAlmostEqual(
+            result["shared_weighted_abs_logprob_gap"][0], abs(np.log(.6) - np.log(.5))
+        )
+        self.assertTrue(np.isnan(result["shared_weighted_abs_logprob_gap"][1]))
+        weights = np.asarray([.6, .2]) / .8
+        expected_gap = np.sum(weights * np.abs(np.log([.6, .2]) - teacher_on_student[0]))
+        self.assertAlmostEqual(result["student_topk_weighted_abs_logprob_gap"][0], expected_gap)
+
+    def test_historical_analysis_is_cpu_only_and_marks_exact_gap_unavailable(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source"
+            output = Path(folder) / "analysis"
+            pair = source / "stage1"
+            pair.mkdir(parents=True)
+            config = {"pairs": [{"label": "stage1"}], "ks": [2]}
+            overlap.write_json(source / "config.json", config)
+            overlap.write_json(source / "COMPLETED.json", {"complete": True})
+            records = []
+            for index, task in enumerate(overlap.TASKS):
+                records.append({"uid": f"{task}:0", "task": task, "response_token_ids": [0],
+                                "finish_reason": "stop"})
+                np.savez(pair / f"student-topk-{index:03d}.npz",
+                         ids=np.asarray([[0, 1]]), probabilities=np.asarray([[.6, .2]]))
+                np.savez(pair / f"teacher-topk-{index:03d}.npz",
+                         ids=np.asarray([[0, 2]]), probabilities=np.asarray([[.5, .3]]))
+            overlap.write_json(pair / "trajectories.json", records)
+            overlap.analyze_existing(config, source, output)
+            summary = [row for row in overlap.read_json(output / "summary.json")
+                       if row["task"] == "ALL"][0]
+            self.assertGreater(summary["token_mean_sparse_union_cosine"], 0)
+            self.assertGreater(summary["token_mean_shared_weighted_abs_logprob_gap"], 0)
+            self.assertIsNone(summary["token_mean_student_topk_weighted_abs_logprob_gap"])
+            self.assertFalse(summary["exact_gap_available"])
+            self.assertTrue((output / "stage1" / "mechanism-k2-000.npz").is_file())
+            with self.assertRaises(ValueError):
+                overlap.analyze_existing(config, source, output)
+
+            for index in range(len(overlap.TASKS)):
+                np.savez(pair / f"teacher-on-student-topk-{index:03d}.npz",
+                         ids=np.asarray([[0, 1]]), log_probabilities=np.log(np.asarray([[.5, .1]])))
+            exact_output = Path(folder) / "exact-analysis"
+            overlap.analyze_existing(config, source, exact_output)
+            exact_summary = [row for row in overlap.read_json(exact_output / "summary.json")
+                             if row["task"] == "ALL"][0]
+            self.assertTrue(exact_summary["exact_gap_available"])
+            self.assertGreater(exact_summary["token_mean_student_topk_weighted_abs_logprob_gap"], 0)
 
     def test_summary_matches_full_vocab_reference_and_weighting(self):
         rng = np.random.default_rng(11)
@@ -96,6 +172,7 @@ class OverlapTests(unittest.TestCase):
             first, last = chunks
             self.assertEqual((first["start"], first["end"], first["tokens"], first["questions"]),
                              (0, 1024, 2049, 3))
+            self.assertEqual(first["responses"], 3)
             self.assertEqual(first["nonempty_tokens"], 1025)
             self.assertAlmostEqual(first["token_mean_ratio"], 1025 / 2049)
             self.assertAlmostEqual(first["token_mean_student_mass"], .4 * 1025 / 2049)

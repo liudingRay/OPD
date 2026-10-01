@@ -1134,6 +1134,27 @@ class RayPPOTrainer:
                             batch.meta_info["kl_estimator"] = kl_estimator
                             batch.meta_info["reward_weight_mode"] = reward_weight_mode
                             batch.meta_info["teacher_temperature"] = teacher_temperature
+                            for key, default in (
+                                ("teacher_weight_mode", "fixed"),
+                                ("teacher_ema_beta", 0.9),
+                                ("teacher_selection_tau", 0.1),
+                            ):
+                                batch.meta_info[key] = self.config.reward_model.get(key, default)
+                            if batch.meta_info["teacher_weight_mode"] not in ("fixed", "ln_softmax"):
+                                raise ValueError("Unknown teacher weight mode")
+                            if batch.meta_info["teacher_weight_mode"] == "ln_softmax" and (
+                                top_k <= 0
+                                or strategy != "only_stu"
+                                or reward_weight_mode != "student_p"
+                                or not self.config.reward_model.get("model_paths")
+                            ):
+                                raise ValueError("LN-softmax requires teacher model_paths and only_stu/student_p top-k")
+                            teacher_weights = self.config.reward_model.get("teacher_weights", None)
+                            teacher_names = self.config.reward_model.get("teacher_names", None)
+                            if teacher_weights is not None:
+                                batch.meta_info["teacher_weights"] = list(teacher_weights)
+                            if teacher_names is not None:
+                                batch.meta_info["teacher_names"] = list(teacher_names)
                             
                             with marked_timer("compute_rm_score", timing_raw, color="magenta"):
                                 teacher_data = self.rm_wg.compute_rm_score(batch)
@@ -1146,6 +1167,93 @@ class RayPPOTrainer:
                                 with marked_timer("compute_distillation_reward", timing_raw, color="orange"):
                                     distillation_output = self.actor_rollout_wg.compute_distillation_reward(batch)
                                     batch = batch.union(distillation_output)
+
+                                if "teacher_reward_sums" in batch.batch:
+                                    reward_sums = batch.batch["teacher_reward_sums"].sum(dim=0)
+                                    reward_counts = batch.batch["teacher_reward_counts"].sum(dim=0).clamp_min(1)
+                                    names = batch.meta_info.get(
+                                        "teacher_names", [f"teacher_{i}" for i in range(reward_sums.numel())]
+                                    )
+                                    weights = batch.meta_info["teacher_weights"]
+                                    normalized_weights = np.asarray(weights, dtype=np.float64)
+                                    normalized_weights /= normalized_weights.sum()
+                                    for index, name in enumerate(names):
+                                        metrics[f"teacher/{name}/reward"] = (
+                                            reward_sums[index] / reward_counts[index]
+                                        ).detach().item()
+                                        if batch.meta_info["teacher_weight_mode"] == "fixed":
+                                            metrics[f"teacher/{name}/weight"] = float(normalized_weights[index])
+
+                                # Opt-in smoke evidence: preserve actual scoring inputs/results
+                                # before PPO consumes them. No effect on numerical training.
+                                audit_dir = os.environ.get("OPD_DYNAMIC_AUDIT_DIR")
+                                if audit_dir and "dynamic_teacher_weight" in batch.batch:
+                                    os.makedirs(audit_dir, exist_ok=True)
+                                    audit_keys = [
+                                        "student_top_k_ids", "student_top_k_log_probs",
+                                        "teacher_on_student_log_probs_by_teacher",
+                                        "teacher_overlap_mask_by_teacher", "response_mask", "rm_scores",
+                                        "dynamic_teacher_overlap_mass", "dynamic_teacher_learnability",
+                                        "dynamic_teacher_js", "dynamic_teacher_utility", "dynamic_teacher_weight",
+                                    ]
+                                    audit_path = os.path.join(audit_dir, f"step-{self.global_steps}.pt")
+                                    with open(audit_path, "xb") as audit_file:
+                                        torch.save({
+                                            "tensors": {key: batch.batch[key][:4].detach().cpu() for key in audit_keys},
+                                            "beta": batch.meta_info["teacher_ema_beta"],
+                                            "tau": batch.meta_info["teacher_selection_tau"],
+                                            "step": self.global_steps,
+                                        }, audit_file)
+                                    print(f"Dynamic teacher audit saved: {audit_path}", flush=True)
+
+                                if "dynamic_teacher_weight" in batch.batch:
+                                    valid = batch.batch["response_mask"].bool()
+                                    weights = batch.batch["dynamic_teacher_weight"]
+                                    names = batch.meta_info.get(
+                                        "teacher_names", [f"teacher_{i}" for i in range(weights.shape[-1])]
+                                    )
+                                    for key in ("overlap_mass", "learnability", "js", "utility", "weight"):
+                                        values = batch.batch[f"dynamic_teacher_{key}"][valid].float()
+                                        if values.shape[0]:
+                                            for index, name in enumerate(names):
+                                                column = values[:, index]
+                                                prefix = f"teacher/{name}/{key}"
+                                                metrics[prefix] = column.mean().item()
+                                                for label, q in (("p10", 0.1), ("p50", 0.5), ("p90", 0.9)):
+                                                    metrics[f"{prefix}_{label}"] = torch.quantile(column, q).item()
+                                    entropy = -(weights * weights.clamp_min(1e-30).log()).sum(-1)
+                                    if valid.any():
+                                        metrics["teacher/weight_entropy"] = entropy[valid].mean().item()
+                                    if "teacher_entropy_by_teacher" in batch.batch:
+                                        batch.batch["teacher_entropy"] = (
+                                            batch.batch["teacher_entropy_by_teacher"] * weights
+                                        ).sum(-1)
+                                    metrics["teacher/entropy_uses_dynamic_weights"] = 1.0
+
+                                if "teacher_entropy_by_teacher" in batch.batch:
+                                    response_mask = batch.batch["response_mask"].float()
+                                    entropy_by_teacher = batch.batch["teacher_entropy_by_teacher"]
+                                    entropy_denominator = response_mask.sum().clamp_min(1)
+                                    overlap_by_teacher = batch.batch["teacher_overlap_mask_by_teacher"].float()
+                                    overlap_denominator = (
+                                        response_mask.sum() * overlap_by_teacher.shape[-2]
+                                    ).clamp_min(1)
+                                    names = batch.meta_info.get(
+                                        "teacher_names",
+                                        [f"teacher_{i}" for i in range(entropy_by_teacher.shape[-1])],
+                                    )
+                                    for index, name in enumerate(names):
+                                        metrics[f"teacher/{name}/entropy"] = (
+                                            (entropy_by_teacher[..., index] * response_mask).sum()
+                                            / entropy_denominator
+                                        ).detach().item()
+                                        metrics[f"teacher/{name}/topk_overlap"] = (
+                                            (
+                                                overlap_by_teacher[..., index]
+                                                * response_mask.unsqueeze(-1)
+                                            ).sum()
+                                            / overlap_denominator
+                                        ).detach().item()
                         
                         # Plot overlapping tokens for Reverse KL
                         if (
@@ -2240,13 +2348,23 @@ class RayPPOTrainer:
 
                     # Pop unused keys to save memory before PPO update
                     keys_to_pop = [
+                        "dynamic_teacher_overlap_mass",
+                        "dynamic_teacher_learnability",
+                        "dynamic_teacher_js",
+                        "dynamic_teacher_utility",
+                        "dynamic_teacher_weight",
                         "teacher_on_student_log_probs",
+                        "teacher_on_student_log_probs_by_teacher",
                         "teacher_top_k_ids",
                         "teacher_top_k_log_probs",
                         "teacher_entropy",
+                        "teacher_entropy_by_teacher",
                         "overlap_mask",
+                        "teacher_overlap_mask_by_teacher",
                         "teacher_in_student_mask",
                         "student_log_probs_on_teacher_ids",
+                        "teacher_reward_sums",
+                        "teacher_reward_counts",
                     ]
                     for key in keys_to_pop:
                         if key in batch.batch.keys():

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Independent single-teacher OPD baseline on Puhui.
+#
+# The official post-trained Qwen3-1.7B student is trained directly against the
+# official post-trained Qwen3-8B teacher. This is not curriculum Stage 2.
+# Four currently idle physical H800 IDs must be supplied explicitly.
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+OPD_BASE=${OPD_BASE:-/mnt/data/chenhang/ldr}
+
+export ACTOR_MODEL_PATH=${ACTOR_MODEL_PATH:-$OPD_BASE/models/Qwen3-1.7B}
+export REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-$OPD_BASE/models/Qwen3-8B}
+
+export MAX_RESP_LENGTH=7680
+export MAX_VAL_RESP_LENGTH=7680
+export TRAINER_SAVE_FREQ=50
+export TRAINER_MAX_ACTOR_CKPT_TO_KEEP=3
+export TRAINER_MAX_CRITIC_CKPT_TO_KEEP=3
+export TRAINER_PROTECTED_CHECKPOINT_STEPS='[200,400,600]'
+export TRAINER_RESUME_MODE=auto
+export WANDB_MODE=offline
+
+export EXPERIMENT_NAME=${EXPERIMENT_NAME:-token_reward_direct_DAPO-Math-17k_singleteacher-independent_Qwen3-1.7B_Qwen3-8B_r7680-T0.6-n2-genk20-topp0.95-opdk16-only_stu-quick80-seed42-4xh800}
+export RAY_TEMP_DIR=${RAY_TEMP_DIR:-$OPD_BASE/r/s8b}
+export TMPDIR=${TMPDIR:-$OPD_BASE/t/singleteacher-8b-r7680}
+
+# stage1 selects the base launcher's single-teacher execution path. The
+# explicit student, teacher, and experiment name above define this independent
+# 8B-teacher control and prevent it from being confused with curriculum Stage 1.
+exec "$SCRIPT_DIR/curriculum-opd-quick80-4xh800" stage1

@@ -425,6 +425,12 @@ reward_model:
   enable_resource_pool: false
   n_gpus_per_node: 0
   nnodes: 0
+  model_paths: null
+  teacher_names: null
+  teacher_weights: null
+  teacher_weight_mode: fixed
+  teacher_ema_beta: 0.9
+  teacher_selection_tau: 0.1
   strategy: megatron
   model:
     input_tokenizer: ${actor_rollout_ref.model.path}

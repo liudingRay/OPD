@@ -49,6 +49,13 @@ class RewardModelConfig(BaseConfig):
     n_gpus_per_node: int = 0
     nnodes: int = 0
 
+    model_paths: Optional[list[str]] = None
+    teacher_names: Optional[list[str]] = None
+    teacher_weights: Optional[list[float]] = None
+    teacher_weight_mode: str = "fixed"
+    teacher_ema_beta: float = 0.9
+    teacher_selection_tau: float = 0.1
+
     # reward model args
     rollout: RolloutConfig = field(default_factory=RolloutConfig)
     model: HFModelConfig = field(default_factory=HFModelConfig)

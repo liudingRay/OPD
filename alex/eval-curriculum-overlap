@@ -7,8 +7,11 @@
 # PAIR_SET=all evaluates the three stage-final pairs. PAIR_SET=curriculum_starts
 # evaluates only the Stage-2 and Stage-3 starting checkpoints against their new
 # teachers. PAIR_SET=official_student_teachers compares one official 1.7B
-# trajectory set with all three teachers. Model paths use the confirmed Alex
-# layout and remain overridable.
+# trajectory set with all three teachers. PAIR_SET=direct_opd_students evaluates
+# three independent 1.7B students trained directly with 4B/8B/14B teachers.
+# PAIR_SET=multiteacher_student_teachers compares one explicitly selected
+# multi-teacher student with all three teachers while reusing its trajectories.
+# Model paths use the confirmed Alex layout and remain overridable.
 
 #SBATCH --job-name=eval-curriculum-overlap
 #SBATCH --partition=a100
@@ -49,6 +52,11 @@ TEACHER14B_PATH=${TEACHER14B_PATH:-$MODEL_ROOT/Qwen3-14B}
 STAGE2_START_MODEL_PATH=${STAGE2_START_MODEL_PATH:-$MODEL_ROOT/Qwen3-1.7B-OPD-4B-quick80-step280}
 STAGE3_START_MODEL_PATH=${STAGE3_START_MODEL_PATH:-$MODEL_ROOT/Qwen3-1.7B-OPD-4B-8B-quick80-step280}
 OFFICIAL_STUDENT_PATH=${OFFICIAL_STUDENT_PATH:-$MODEL_ROOT/Qwen3-1.7B}
+DIRECT_OPD4B_PATH=${DIRECT_OPD4B_PATH:-$MODEL_ROOT/Qwen3-1.7B-OPD-4B-quick80-step280}
+DIRECT_OPD8B_PATH=${DIRECT_OPD8B_PATH:-$MODEL_ROOT/Qwen3-1.7B-OPD-8B-quick80-step300}
+DIRECT_OPD14B_PATH=${DIRECT_OPD14B_PATH:-$MODEL_ROOT/Qwen3-1.7B-OPD-14B-quick80-step300}
+MULTITEACHER_STUDENT_PATH=${MULTITEACHER_STUDENT_PATH:-}
+MULTITEACHER_STUDENT_LABEL=${MULTITEACHER_STUDENT_LABEL:-multiteacher_student}
 
 case "$PAIR_SET" in
     all)
@@ -87,14 +95,48 @@ case "$PAIR_SET" in
             "$OFFICIAL_STUDENT_PATH" "$TEACHER4B_PATH" "$TEACHER8B_PATH" "$TEACHER14B_PATH"
         )
         ;;
+    direct_opd_students)
+        DEFAULT_OUTPUT_NAME=direct-opd-overlap-fixed-student
+        PAIR_ARGS=(
+            --pair "direct_opd_4b=$DIRECT_OPD4B_PATH,$TEACHER4B_PATH"
+            --pair "direct_opd_8b=$DIRECT_OPD8B_PATH,$TEACHER8B_PATH"
+            --pair "direct_opd_14b=$DIRECT_OPD14B_PATH,$TEACHER14B_PATH"
+        )
+        MODELS_TO_VALIDATE=(
+            "$DIRECT_OPD4B_PATH" "$DIRECT_OPD8B_PATH" "$DIRECT_OPD14B_PATH"
+            "$TEACHER4B_PATH" "$TEACHER8B_PATH" "$TEACHER14B_PATH"
+        )
+        ;;
+    multiteacher_student_teachers)
+        [[ -n "$MULTITEACHER_STUDENT_PATH" ]] || {
+            echo "MULTITEACHER_STUDENT_PATH is required for PAIR_SET=multiteacher_student_teachers" >&2
+            exit 2
+        }
+        [[ "$MULTITEACHER_STUDENT_LABEL" =~ ^[A-Za-z0-9_.-]+$ ]] || {
+            echo "MULTITEACHER_STUDENT_LABEL must contain only letters, digits, dot, underscore, or hyphen" >&2
+            exit 2
+        }
+        DEFAULT_OUTPUT_NAME=${MULTITEACHER_STUDENT_LABEL}-overlap-fixed-teachers
+        PAIR_ARGS=(
+            --pair "${MULTITEACHER_STUDENT_LABEL}_vs_4b=$MULTITEACHER_STUDENT_PATH,$TEACHER4B_PATH"
+            --pair "${MULTITEACHER_STUDENT_LABEL}_vs_8b=$MULTITEACHER_STUDENT_PATH,$TEACHER8B_PATH"
+            --pair "${MULTITEACHER_STUDENT_LABEL}_vs_14b=$MULTITEACHER_STUDENT_PATH,$TEACHER14B_PATH"
+            --reuse-trajectories "${MULTITEACHER_STUDENT_LABEL}_vs_8b=${MULTITEACHER_STUDENT_LABEL}_vs_4b"
+            --reuse-trajectories "${MULTITEACHER_STUDENT_LABEL}_vs_14b=${MULTITEACHER_STUDENT_LABEL}_vs_4b"
+        )
+        MODELS_TO_VALIDATE=(
+            "$MULTITEACHER_STUDENT_PATH" "$TEACHER4B_PATH" "$TEACHER8B_PATH" "$TEACHER14B_PATH"
+        )
+        ;;
     *)
-        echo "PAIR_SET must be all, curriculum_starts, or official_student_teachers; got: $PAIR_SET" >&2
+        echo "PAIR_SET must be all, curriculum_starts, official_student_teachers, direct_opd_students, or multiteacher_student_teachers; got: $PAIR_SET" >&2
         exit 2
         ;;
 esac
 OVERLAP_OUTPUT_ROOT=${OVERLAP_OUTPUT_ROOT:-$EXPERIMENT_ROOT/evaluation/$DEFAULT_OUTPUT_NAME}
 
 QUESTIONS_PER_TASK=${QUESTIONS_PER_TASK:-5}
+SAMPLES_PER_QUESTION=${SAMPLES_PER_QUESTION:-1}
 SEED=${SEED:-42}
 MAX_TOKENS=${MAX_TOKENS:-38912}
 TEMPERATURE=${TEMPERATURE:-0.6}
@@ -126,7 +168,7 @@ fi
 ARGS=(
     "${PAIR_ARGS[@]}"
     --data-dir "$DATA_DIR" --output-root "$OVERLAP_OUTPUT_ROOT"
-    --questions-per-task "$QUESTIONS_PER_TASK" --seed "$SEED"
+    --questions-per-task "$QUESTIONS_PER_TASK" --samples-per-question "$SAMPLES_PER_QUESTION" --seed "$SEED"
     --max-tokens "$MAX_TOKENS" --temperature "$TEMPERATURE" --top-p "$TOP_P"
     --generation-top-k "$GENERATION_TOP_K" --ks 4 8 16
     --score-chunk-size "$SCORE_CHUNK_SIZE"
@@ -169,10 +211,14 @@ if [[ -z ${SLURM_JOB_ID:-} || ${DRY_RUN:-0} == 1 ]]; then
     export OPD_WS PROJECT_DIR OPD_ENV MODEL_ROOT EXPERIMENT_ROOT OPD_CACHE_ROOT DATA_DIR LOG_DIR
     export PAIR_SET OVERLAP_OUTPUT_ROOT STAGE1_MODEL_PATH STAGE2_MODEL_PATH STAGE3_MODEL_PATH
     export STAGE2_START_MODEL_PATH STAGE3_START_MODEL_PATH
-    export OFFICIAL_STUDENT_PATH
+    export OFFICIAL_STUDENT_PATH DIRECT_OPD4B_PATH DIRECT_OPD8B_PATH DIRECT_OPD14B_PATH
+    export MULTITEACHER_STUDENT_PATH MULTITEACHER_STUDENT_LABEL
     export TEACHER4B_PATH TEACHER8B_PATH TEACHER14B_PATH
-    export QUESTIONS_PER_TASK SEED MAX_TOKENS TEMPERATURE TOP_P GENERATION_TOP_K SCORE_CHUNK_SIZE
-    exec sbatch --export=ALL --output="$LOG_DIR/%x-%j.out" --error="$LOG_DIR/%x-%j.err" "$(realpath "$0")"
+    export QUESTIONS_PER_TASK SAMPLES_PER_QUESTION SEED MAX_TOKENS TEMPERATURE TOP_P GENERATION_TOP_K
+    export SCORE_CHUNK_SIZE
+    JOB_NAME=${JOB_NAME:-eval-overlap-${PAIR_SET}-q${QUESTIONS_PER_TASK}-r${SAMPLES_PER_QUESTION}}
+    exec sbatch --export=ALL --job-name="$JOB_NAME" \
+        --output="$LOG_DIR/%x-%j.out" --error="$LOG_DIR/%x-%j.err" "$(realpath "$0")"
 fi
 
 # Preserve Slurm's selected GPU; never replace it with a physical GPU guess.
@@ -186,7 +232,7 @@ mkdir -p "$TMPDIR" "$HF_HUB_CACHE" "$HF_DATASETS_CACHE" "$TRITON_CACHE_DIR" \
     "$VLLM_CONFIG_ROOT" "$VLLM_CACHE_ROOT" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$OUTLINES_CACHE_DIR"
 cd "$PROJECT_DIR"
 echo "Start: $(date --iso-8601=seconds), job=$SLURM_JOB_ID, nodes=${SLURM_JOB_NODELIST:-unknown}"
-echo "Output: $OVERLAP_OUTPUT_ROOT (includes 1024-response-token summary_chunks.md/csv/json)"
+echo "Output: $OVERLAP_OUTPUT_ROOT ($QUESTIONS_PER_TASK questions/task x $SAMPLES_PER_QUESTION responses/question)"
 python --version
 python -m pip check
 nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu --format=csv,noheader

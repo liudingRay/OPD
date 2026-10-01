@@ -83,6 +83,7 @@ from verl.utils.fsdp_utils import (
 from verl.utils.import_utils import import_external_libs
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.model import compute_position_id_with_mask, convert_weight_keys
+from verl.utils.multi_teacher import normalize_teacher_weights, weighted_teacher_sum
 from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage, simple_timer
 from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min_max
 from verl.utils.py_functional import convert_to_regular_types
@@ -1920,12 +1921,82 @@ class RewardModelWorker(Worker, DistProfilerExtension):
     def init_model(self):
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
-        self.reward_module = self._build_model(config=self.config)
+        configured_paths = self.config.get("model_paths", None)
+        model_paths = list(configured_paths) if configured_paths else [self.config.model.path]
+        if len(model_paths) > 1:
+            if self.config.model.input_tokenizer is not None:
+                raise ValueError("Multi-teacher OPD requires a shared tokenizer and model.input_tokenizer=null")
+            from transformers import AutoConfig
 
-    def _forward_micro_batch(self, micro_batch, student_top_k_ids=None, compute_entropy=False, top_k=0, strategy="only_stu", teacher_temperature=1.0):
+            teacher_model_identities = {
+                (
+                    model_config.model_type,
+                    model_config.vocab_size,
+                )
+                for model_config in (
+                    AutoConfig.from_pretrained(
+                        model_path,
+                        trust_remote_code=self.config.model.get("trust_remote_code", False),
+                    )
+                    for model_path in model_paths
+                )
+            }
+            if len(teacher_model_identities) != 1:
+                raise ValueError(
+                    "Multi-teacher OPD requires all teachers to have the same model type and vocabulary size; "
+                    f"got {sorted(teacher_model_identities)}"
+                )
+        configured_names = self.config.get("teacher_names", None)
+        self.teacher_names = (
+            list(configured_names) if configured_names else [f"teacher_{i}" for i in range(len(model_paths))]
+        )
+        if len(self.teacher_names) != len(model_paths):
+            raise ValueError(
+                f"reward_model.teacher_names has {len(self.teacher_names)} entries, "
+                f"but model_paths has {len(model_paths)}"
+            )
+
+        configured_weights = self.config.get("teacher_weights", None)
+        raw_weights = list(configured_weights) if configured_weights else [1.0] * len(model_paths)
+        self.teacher_weights = normalize_teacher_weights(raw_weights, len(model_paths)).tolist()
+
+        self.reward_modules = []
+        for model_path in model_paths:
+            if configured_paths:
+                teacher_config = OmegaConf.create(OmegaConf.to_container(self.config, resolve=True))
+                with open_dict(teacher_config):
+                    teacher_config.model.path = model_path
+            else:
+                teacher_config = self.config
+            self.reward_modules.append(self._build_model(config=teacher_config))
+
+        # Preserve the single-teacher attribute used by existing profiling and
+        # compatibility paths. Multi-teacher code iterates reward_modules.
+        self.reward_module = self.reward_modules[0]
+
+        if self.rank == 0:
+            teacher_summary = ", ".join(
+                f"{name}={path} (weight={weight:.6f})"
+                for name, path, weight in zip(self.teacher_names, model_paths, self.teacher_weights, strict=True)
+            )
+            print(f"Initialized {len(self.reward_modules)} OPD teacher(s): {teacher_summary}")
+
+    def _forward_micro_batch(
+        self,
+        micro_batch,
+        student_top_k_ids=None,
+        compute_entropy=False,
+        top_k=0,
+        strategy="only_stu",
+        teacher_temperature=1.0,
+        reward_module=None,
+    ):
         from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
         from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad_and_slice_inputs, ulysses_pad
         import verl.utils.torch_functional as verl_F
+
+        if reward_module is None:
+            reward_module = self.reward_module
         response_length = micro_batch["responses"].size(-1)
         with torch.no_grad(), torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
             input_ids = micro_batch["input_ids"]
@@ -1990,7 +2061,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                     )
 
                 input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)
-                output = self.reward_module(
+                output = reward_module(
                     input_ids=input_ids_rmpad,
                     attention_mask=None,
                     position_ids=position_ids_rmpad,
@@ -2226,7 +2297,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                     teacher_entropy = full_entropy.squeeze(-1)[:, -response_length - 1 : -1]
 
             else:
-                output = self.reward_module(
+                output = reward_module(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
@@ -2560,24 +2631,8 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         # Support all hardwares
         data = data.to(get_device_id())
 
-        # Get student log probabilities from trajectories
         student_logp = data.batch["old_log_probs"]  # shape: [batch, response_len]
-        
-        student_top_k_ids = None
-        student_top_k_log_probs = None
-        if "student_top_k_ids" in data.batch.keys():
-             student_top_k_ids = data.batch["student_top_k_ids"]
-             student_top_k_log_probs = data.batch["student_top_k_log_probs"]
-        
-        # Get global_steps from meta_info
-        global_steps = data.meta_info.get("global_steps", -1)
-        is_plot = data.meta_info.get("is_plot", False)
-        # Compute teacher entropy every step for logging, but only plot every 10 steps
-        compute_entropy = True
-
-        # Get response mask to identify valid (non-padded) response tokens
-
-        response_mask = data.batch["response_mask"]  # shape: [batch, response_len]
+        student_top_k_ids = data.batch.get("student_top_k_ids", None)
 
         if self._do_switch_chat_template:
             if self.rank == 0:
@@ -2596,7 +2651,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         rm_data = rm_data.to(get_device_id())
         
         if student_top_k_ids is not None:
-             rm_data.batch["student_top_k_ids"] = student_top_k_ids
+            rm_data.batch["student_top_k_ids"] = student_top_k_ids
 
         # perform forward computation
         with self.ulysses_sharding_manager:
@@ -2604,158 +2659,124 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             if use_dynamic_bsz:
                 max_token_len = self.config.forward_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
                 micro_batches, indices = rearrange_micro_batches(batch=rm_data.batch, max_token_len=max_token_len)
+                indices = list(itertools.chain.from_iterable(indices))
             else:
                 micro_batches = rm_data.batch.split(self.config.micro_batch_size_per_gpu)
-            
-            # Get Top-K and Top-P from config
+                indices = None
+            micro_batches = list(micro_batches)
+
             top_k = data.meta_info.get("log_prob_top_k", self.config.get("log_prob_top_k", 0))
             top_k_strategy = data.meta_info.get("top_k_strategy", self.config.get("top_k_strategy", "only_stu"))
             teacher_temperature = data.meta_info.get("teacher_temperature", self.config.get("teacher_temperature", 1.0))
-            
-            output_logp = []
-            output_on_student_logp = []
-            output_teacher_top_k_ids = []
-            output_teacher_top_k_logp = []
-            output_entropy = []
-            output_valid_counts = []
-            output_overlap_counts = []
-            output_teacher_in_student = []  # For union strategy: T_in_S computed in chunks
-            
-            for micro_batch in micro_batches:
-                # micro_batch is a DataProto or DataProtoItem.
-                # If it's a DataProto, it has .batch (TensorDict).
-                # If it's a TensorDict (from .split()), it behaves like a dict.
-                
-                # Check if micro_batch is a DataProto or DataProtoItem
-                if hasattr(micro_batch, 'batch') and isinstance(micro_batch.batch, TensorDict):
-                    mb_top_k_ids = micro_batch.batch.get("student_top_k_ids", None)
-                elif isinstance(micro_batch, TensorDict):
-                    # Direct TensorDict
-                    mb_top_k_ids = micro_batch.get("student_top_k_ids", None)
-                else:
-                    # Fallback for other types (e.g. dict) if split behaves differently
-                    mb_top_k_ids = micro_batch.get("student_top_k_ids", None) if hasattr(micro_batch, "get") else None
+            if len(self.reward_modules) > 1 and (top_k <= 0 or top_k_strategy != "only_stu"):
+                raise ValueError("Multi-teacher OPD currently requires log_prob_top_k > 0 and top_k_strategy=only_stu")
 
-                teacher_logp_batch, teacher_on_student_logp_batch, teacher_top_k_ids_batch, teacher_top_k_logp_teacher_batch, teacher_entropy_batch, teacher_valid_counts_batch, teacher_overlap_mask_batch, teacher_in_student_mask_batch = self._forward_micro_batch(
-                    micro_batch, 
-                    student_top_k_ids=mb_top_k_ids,
-                    compute_entropy=compute_entropy,
-                    top_k=top_k,
-                    strategy=top_k_strategy,
-                    teacher_temperature=teacher_temperature
-                )
-                output_logp.append(teacher_logp_batch)
-                if teacher_on_student_logp_batch is not None:
-                    output_on_student_logp.append(teacher_on_student_logp_batch)
-                if teacher_top_k_ids_batch is not None:
-                    output_teacher_top_k_ids.append(teacher_top_k_ids_batch)
-                if teacher_top_k_logp_teacher_batch is not None:
-                    output_teacher_top_k_logp.append(teacher_top_k_logp_teacher_batch)
-                if teacher_entropy_batch is not None:
-                    output_entropy.append(teacher_entropy_batch)
-                if teacher_valid_counts_batch is not None:
-                    output_valid_counts.append(teacher_valid_counts_batch)
-                if teacher_overlap_mask_batch is not None:
-                    output_overlap_counts.append(teacher_overlap_mask_batch)
-                if teacher_in_student_mask_batch is not None:
-                    output_teacher_in_student.append(teacher_in_student_mask_batch)
-                    
-            teacher_logp = torch.cat(output_logp, dim=0)
-            teacher_on_student_logp = None
-            if len(output_on_student_logp) > 0:
-                teacher_on_student_logp = torch.cat(output_on_student_logp, dim=0)
-            
-            teacher_top_k_ids = None
-            if len(output_teacher_top_k_ids) > 0:
-                teacher_top_k_ids = torch.cat(output_teacher_top_k_ids, dim=0)
+            teacher_outputs = []
+            output_names = (
+                "teacher_logp",
+                "teacher_on_student_log_probs",
+                "teacher_top_k_ids",
+                "teacher_top_k_log_probs",
+                "teacher_entropy",
+                "teacher_valid_counts",
+                "overlap_mask",
+                "teacher_in_student_mask",
+            )
+            for reward_module in self.reward_modules:
+                collected = {name: [] for name in output_names}
+                for micro_batch in micro_batches:
+                    if hasattr(micro_batch, "batch") and isinstance(micro_batch.batch, TensorDict):
+                        mb_top_k_ids = micro_batch.batch.get("student_top_k_ids", None)
+                    elif isinstance(micro_batch, TensorDict):
+                        mb_top_k_ids = micro_batch.get("student_top_k_ids", None)
+                    else:
+                        mb_top_k_ids = (
+                            micro_batch.get("student_top_k_ids", None) if hasattr(micro_batch, "get") else None
+                        )
 
-            teacher_top_k_logp = None
-            if len(output_teacher_top_k_logp) > 0:
-                teacher_top_k_logp = torch.cat(output_teacher_top_k_logp, dim=0)
-            
-            teacher_entropy = None
-            if len(output_entropy) > 0:
-                teacher_entropy = torch.cat(output_entropy, dim=0)
+                    forward_output = self._forward_micro_batch(
+                        micro_batch,
+                        student_top_k_ids=mb_top_k_ids,
+                        compute_entropy=True,
+                        top_k=top_k,
+                        strategy=top_k_strategy,
+                        teacher_temperature=teacher_temperature,
+                        reward_module=reward_module,
+                    )
+                    for name, value in zip(output_names, forward_output, strict=True):
+                        if value is not None:
+                            collected[name].append(value)
 
-            teacher_valid_counts = None
-            if len(output_valid_counts) > 0:
-                teacher_valid_counts = torch.cat(output_valid_counts, dim=0)
+                model_output = {
+                    name: torch.cat(values, dim=0) if values else None for name, values in collected.items()
+                }
+                if indices is not None:
+                    teacher_logp = model_output["teacher_logp"]
+                    assert len(indices) == teacher_logp.size(0), f"{len(indices)} vs. {teacher_logp.size(0)}"
+                    revert_indices = torch.tensor(
+                        get_reverse_idx(indices), dtype=torch.long, device=teacher_logp.device
+                    )
+                    model_output = {
+                        name: value[revert_indices] if value is not None else None
+                        for name, value in model_output.items()
+                    }
+                if len(self.reward_modules) > 1:
+                    # Teacher top-k IDs/log-probs are needed transiently to
+                    # compute overlap, but keeping all three copies would add
+                    # substantial peak memory without affecting only_stu OPD.
+                    model_output = {
+                        name: model_output[name]
+                        for name in (
+                            "teacher_on_student_log_probs",
+                            "teacher_entropy",
+                            "overlap_mask",
+                        )
+                    }
+                teacher_outputs.append(model_output)
 
-            teacher_overlap_mask = None
-            if len(output_overlap_counts) > 0:
-                teacher_overlap_mask = torch.cat(output_overlap_counts, dim=0)
-
-            teacher_in_student_mask = None
-            if len(output_teacher_in_student) > 0:
-                teacher_in_student_mask = torch.cat(output_teacher_in_student, dim=0)
-
-            if use_dynamic_bsz:
-                indices = list(itertools.chain.from_iterable(indices))
-                assert len(indices) == teacher_logp.size(0), f"{len(indices)} vs. {teacher_logp.size(0)}"
-                revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long, device=teacher_logp.device)
-                teacher_logp = teacher_logp[revert_indices]
-                if teacher_on_student_logp is not None:
-                    teacher_on_student_logp = teacher_on_student_logp[revert_indices]
-                if teacher_top_k_ids is not None:
-                    teacher_top_k_ids = teacher_top_k_ids[revert_indices]
-                if teacher_top_k_logp is not None:
-                    teacher_top_k_logp = teacher_top_k_logp[revert_indices]
-                if teacher_entropy is not None:
-                    teacher_entropy = teacher_entropy[revert_indices]
-                if teacher_valid_counts is not None:
-                    teacher_valid_counts = teacher_valid_counts[revert_indices]
-                if teacher_overlap_mask is not None:
-                    teacher_overlap_mask = teacher_overlap_mask[revert_indices]
-                if teacher_in_student_mask is not None:
-                    teacher_in_student_mask = teacher_in_student_mask[revert_indices]
-
-            if top_k > 0:
-                # Reward calculation is moved to ray_trainer for top_k > 0
-                # because it needs student_on_teacher_log_probs which requires another actor forward
-                rm_scores = None 
-                overlap_mask = teacher_overlap_mask
-            else:
-                print("Top-k log probs not present, just using student_logp - teacher_logp as reward")
-                
-                reverse_kl = student_logp - teacher_logp
-                rm_scores = -reverse_kl
-                
-                teacher_valid_counts = None
-                overlap_mask = None
-            
             tensors = {}
-            if rm_scores is not None:
-                tensors["rm_scores"] = rm_scores
-            
-            if teacher_on_student_logp is not None:
-                tensors["teacher_on_student_log_probs"] = teacher_on_student_logp
+            if len(teacher_outputs) == 1:
+                model_output = teacher_outputs[0]
+                teacher_logp = model_output["teacher_logp"]
+                if top_k > 0:
+                    rm_scores = None
+                else:
+                    print("Top-k log probs not present, just using student_logp - teacher_logp as reward")
+                    rm_scores = -(student_logp - teacher_logp)
 
-            if teacher_top_k_ids is not None:
-                tensors["teacher_top_k_ids"] = teacher_top_k_ids
+                if rm_scores is not None:
+                    tensors["rm_scores"] = rm_scores
+                for name in output_names[1:]:
+                    value = model_output[name]
+                    if value is not None:
+                        tensors[name] = value
+            else:
+                on_student_by_teacher = torch.stack(
+                    [model_output["teacher_on_student_log_probs"] for model_output in teacher_outputs], dim=-1
+                )
+                tensors["teacher_on_student_log_probs_by_teacher"] = on_student_by_teacher
 
-            if teacher_top_k_logp is not None:
-                tensors["teacher_top_k_log_probs"] = teacher_top_k_logp
+                entropy_by_teacher = torch.stack(
+                    [model_output["teacher_entropy"] for model_output in teacher_outputs], dim=-1
+                )
+                tensors["teacher_entropy_by_teacher"] = entropy_by_teacher
+                tensors["teacher_entropy"] = weighted_teacher_sum(entropy_by_teacher, self.teacher_weights)
 
-            if teacher_entropy is not None:
-                tensors["teacher_entropy"] = teacher_entropy
-                
-            if teacher_valid_counts is not None:
-                tensors["teacher_valid_counts"] = teacher_valid_counts
-            if overlap_mask is not None:
-                tensors["overlap_mask"] = overlap_mask
-            if teacher_in_student_mask is not None:
-                tensors["teacher_in_student_mask"] = teacher_in_student_mask
-
-            output = DataProto.from_dict(tensors=tensors)
+                overlap_by_teacher = torch.stack(
+                    [model_output["overlap_mask"] for model_output in teacher_outputs], dim=-1
+                )
+                tensors["teacher_overlap_mask_by_teacher"] = overlap_by_teacher
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
-        if self.world_size > 1 and fsdp_version(self.reward_module) == 1:
-            self.reward_module._handle.reshard(True)
+        if self.world_size > 1:
+            for reward_module in self.reward_modules:
+                if fsdp_version(reward_module) == 1:
+                    reward_module._handle.reshard(True)
 
         # Keep on GPU to avoid expensive CPU-GPU transfer for large top-k data
         # output = output.to("cpu")
-        return output
+        return DataProto.from_dict(tensors=tensors)
 
 
 # ================================= Async related workers =================================

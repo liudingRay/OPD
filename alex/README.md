@@ -70,6 +70,33 @@ bash alex/curriculum-opd stage1
 The job requests one Alex node with four A100-80GB GPUs and 32 CPUs for 24
 hours. Repeat with `stage2` and `stage3` after merging the preceding stage.
 
+## Equal-weight multi-teacher baseline
+
+The independent multi-teacher baseline starts from the official post-trained
+`Qwen3-1.7B` student. Qwen3-4B, Qwen3-8B, and Qwen3-14B score the same student
+trajectory, and their token-level OPD rewards are combined with normalized
+weights `[1, 1, 1]`. This is a uniform teacher ensemble, not a curriculum stage.
+
+Its formal launcher inherits the quick-80 settings, except that both training
+and validation response limits are deliberately reduced to 7680 tokens:
+
+```bash
+cd "$(ws_find opd)/OPD"
+bash alex/multiteacher-opd-quick80-4xa100
+```
+
+Run the bounded end-to-end smoke test before the formal submission:
+
+```bash
+SMOKE=1 bash alex/multiteacher-opd-quick80-4xa100
+```
+
+The launcher validates the official `Qwen3-1.7B`, `Qwen3-4B`, `Qwen3-8B`, and
+`Qwen3-14B` directories under `$(ws_find opd)/models`. Override
+`ACTOR_MODEL_PATH`, `TEACHER4B_PATH`, `TEACHER8B_PATH`, or `TEACHER14B_PATH`
+only with verified complete Hugging Face model directories. Use `DRY_RUN=1` to
+perform the login-node preflight without submitting a job.
+
 ## One-step smoke test
 
 Before the full 24-hour submission, request a shorter backfill-friendly job:
@@ -182,9 +209,12 @@ the CPU preflight and does not submit a job. The default final students are
 Override `STAGE1_MODEL_PATH`, `STAGE2_MODEL_PATH`, `STAGE3_MODEL_PATH`,
 `TEACHER4B_PATH`, `TEACHER8B_PATH`, or `TEACHER14B_PATH` for other verified paths.
 
-The settings match Puhui: five fixed questions per AIME24/AIME25/AMC23 (`SEED=42`),
-one thinking response per question, `MAX_TOKENS=38912`, temperature 0.6, top-p
-0.95, generation top-k 20, and diagnostic k=4/8/16. This is forward-only;
+The default settings match Puhui: five fixed questions per AIME24/AIME25/AMC23
+(`SEED=42`), one thinking response per question, `MAX_TOKENS=38912`, temperature
+0.6, top-p 0.95, generation top-k 20, and diagnostic k=4/8/16. Set
+`QUESTIONS_PER_TASK` and `SAMPLES_PER_QUESTION` explicitly for larger runs. Each
+repeated response receives a unique deterministic seed and UID; summaries report
+both unique-question and response counts. This is forward-only;
 there is no training or backward pass. Each student generates its own trajectory,
 and its teacher scores those same prefixes; this is not a fixed-prefix comparison
 across all students or a start/middle/end checkpoint sweep.
@@ -198,6 +228,29 @@ mass and the legacy nonempty-intersection mass mean, plus contributing question
 and token counts. `SCORE_CHUNK_SIZE=128` controls forward-pass memory only.
 The shared file `scripts/val/eval/eval_fixed_overlap.py` must be present on Alex.
 Logs are saved to `experiments/OPD/logs/eval-curriculum-overlap-<job-id>.out/.err`.
+
+New runs also write `mechanism-analysis/` with sparse-union cosine and two
+student-weighted absolute log-probability-gap variants. Sparse-union cosine aligns
+token IDs and treats probabilities outside each model's own top-k as zero. The
+shared-token gap is conditional on a nonempty intersection. The exact
+student-top-k gap uses teacher probabilities on every student top-k token, which
+the scorer now saves during the existing teacher forward pass.
+
+Completed historical runs can be analyzed CPU-only without loading models or
+changing the original result directory:
+
+```bash
+cd "$(ws_find opd)/OPD"
+source "$(ws_find opd)/envs/opd-py312/bin/activate"
+python scripts/val/eval/eval_fixed_overlap.py analyze-existing \
+  --input-root "$(ws_find opd)/experiments/OPD/evaluation/direct-opd-overlap-fixed"
+```
+
+The default sibling output is `<input-name>-mechanism-analysis`; an existing
+target is rejected. Historical files support exact sparse-union cosine and the
+shared-token gap. Their exact student-top-k gap is reported as `N/A`, because
+they did not save teacher probabilities for student-only top-k tokens. Use
+`--output-root` to select another new directory.
 
 To measure only the two curriculum transition points, submit:
 
@@ -225,6 +278,19 @@ Qwen3-14B on those exact same prefixes. The output directory is
 teacher-scale comparison prefix controlled and avoids two redundant student
 generation/scoring passes. Override `OFFICIAL_STUDENT_PATH` if necessary.
 
+To evaluate the three independent teacher-scale controls, each starting from the
+official Qwen3-1.7B student rather than a preceding curriculum stage:
+
+```bash
+PAIR_SET=direct_opd_students bash alex/eval-curriculum-overlap
+```
+
+This pairs `Qwen3-1.7B-OPD-4B-quick80-step280`,
+`Qwen3-1.7B-OPD-8B-quick80-step300`, and
+`Qwen3-1.7B-OPD-14B-quick80-step300` with their respective official teachers.
+Override `DIRECT_OPD4B_PATH`, `DIRECT_OPD8B_PATH`, or `DIRECT_OPD14B_PATH` for
+other independent runs. These pairs are controls, not curriculum stages.
+
 ## Operational behavior
 
 - All behavior-changing training controls are inherited from the puhui
@@ -243,3 +309,76 @@ generation/scoring passes. Override `OFFICIAL_STUDENT_PATH` if necessary.
   the next safe step boundary.
 - Training and FSDP merge remain separate operations. This launcher never
   merges or overwrites a model directory.
+
+## Dynamic multi-teacher OPD (LN-softmax)
+
+The Alex-only launch integration below uses the shared algorithm under `verl/`.
+It inherits the uniform-three-teacher baseline's data, 7680-token train/validation
+response limits, two rollouts, two epochs, seed, checkpoint cadence, and allocation.
+It starts from official post-trained Qwen3-1.7B with frozen 4B/8B/14B teachers;
+this is one simultaneous multi-teacher run, not sequential curriculum stages.
+
+```bash
+cd "$(ws_find opd)/OPD"
+DRY_RUN=1 bash alex/dynamic-multiteacher-opd-quick80-4xa100
+# Submit a bounded smoke test explicitly after preflight:
+SMOKE=1 bash alex/dynamic-multiteacher-opd-quick80-4xa100
+# Formal run (explicit submission):
+bash alex/dynamic-multiteacher-opd-quick80-4xa100
+```
+
+`TEACHER_EMA_BETA=0.9` and `TEACHER_SELECTION_TAU=0.1` are configurable.
+The generated experiment family is `multiteacher-ln-softmax-b0.9-tau0.1`;
+checkpoint and W&B identities are separate from uniform3. Formal runs auto-resume
+only their own experiment directory. Smoke runs disable resume and checkpointing.
+Do not override `EXPERIMENT_NAME` to an existing baseline name. There is no
+cross-step EMA state to checkpoint: each newly sampled trajectory initializes
+L from its first valid response token and resets independently.
+
+At each valid thinking/answer token, overlap mass sums the student's original
+full-vocabulary probabilities for shared top-K IDs. L is its trajectory EMA.
+N is JS/ln(2) after conditioning both models on the same student candidate IDs.
+Teacher weights are softmax(L*N/tau), without a fixed prior. Detached weights
+mix the original per-teacher OPD rewards using full-vocabulary log probabilities;
+the existing candidate weighting, advantages and clipped actor loss are unchanged.
+Padding does not update EMA. Three zero utilities yield uniform weights.
+
+Per-teacher logs contain mean/p10/p50/p90 of `overlap_mass`, `learnability`, `js`,
+`utility`, and `weight`; `teacher/weight_entropy` measures selection concentration.
+`teacher/entropy` uses dynamic weights in this mode, explicitly marked by
+`teacher/entropy_uses_dynamic_weights`. Original single-teacher and fixed-weight
+modes remain available. Leonardo/Puhui launchers are not changed for this experiment.
+GPU smoke validation is required before claiming distributed training is verified;
+CPU numerical tests alone do not establish GPU memory sufficiency or throughput.
+
+Local validation (2026-09-30): 22 CPU tests passed (7 existing fixed-weight
+regressions and 15 dynamic tests). The numerical suite also executes the actual
+worker candidate-scoring and actor reward methods in isolation, checking batch
+partition invariance. Optional distributed imports were bypassed for these CPU
+tests; Ray/FSDP transport itself was not exercised. Shell syntax and temporary
+fixture preflights passed for both uniform/dynamic formal and smoke launchers.
+The temporary fixture only checks launcher configuration, not real model files.
+No Alex GPU job was submitted, and no checkpoint was merged.
+
+For numerical smoke auditing, set `OPD_DYNAMIC_AUDIT_DIR` to a new absolute
+output directory when submitting the smoke. The trainer saves the first four
+complete trajectories' real scoring tensors, masks, diagnostics and mixed rewards
+as `step-<step>.pt` before the actor update. Existing files are rejected. Leave
+this variable unset for normal training. Independently recompute the dump using:
+
+```bash
+python verl/tests/utils/audit_dynamic_teacher.py /absolute/audit/directory/step-1.pt
+```
+
+This audit uses CPU float64 and a sequential masked EMA, without importing the
+production weight function. It writes a JSON report with error tolerances and
+max/mean errors. It checks arithmetic on actual scoring outputs; it does not
+prove model quality or reproduce full-vocabulary model forwards independently.
+
+GPU follow-up (2026-09-30): job 4419300 completed one full step on four
+A100-80GB GPUs (a0532), exit 0, wall time 9m01s. Float64 independent audit of
+four real trajectories / 12,708 valid response tokens passed; maximum absolute
+errors were 7.02e-7 for teacher weights and 2.69e-6 for mixed rewards. Audit
+artifacts are under `experiments/OPD/dynamic-audit-20260930`. A W&B atexit
+BrokenPipeError appeared after training completed; the job still exited 0.
+This verifies the smoke path, not long-run stability or model-quality gains.

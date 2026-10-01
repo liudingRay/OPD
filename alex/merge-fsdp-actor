@@ -68,9 +68,16 @@ require_file "$ACTOR_CKPT/fsdp_config.json"
 require_file "$ACTOR_CKPT/huggingface/config.json"
 
 RECORDED_STEP=$(tr -d '[:space:]' < "$TRACKER")
-if [[ "$RECORDED_STEP" != "$EXPECTED_STEP" ]]; then
-    echo "Refusing to merge: tracker records global_step_${RECORDED_STEP}, expected global_step_${EXPECTED_STEP}." >&2
+if [[ ! "$RECORDED_STEP" =~ ^[0-9]+$ || ! "$EXPECTED_STEP" =~ ^[0-9]+$ ]]; then
+    echo "Checkpoint steps must be non-negative integers." >&2
     exit 1
+fi
+if [[ "$RECORDED_STEP" != "$EXPECTED_STEP" ]]; then
+    if [[ ${ALLOW_OLDER_CHECKPOINT:-0} != 1 ]] || (( 10#$EXPECTED_STEP > 10#$RECORDED_STEP )); then
+        echo "Tracker is step $RECORDED_STEP; selecting an older checkpoint requires ALLOW_OLDER_CHECKPOINT=1." >&2
+        exit 1
+    fi
+    echo "Explicitly merging retained step $EXPECTED_STEP; latest tracker remains $RECORDED_STEP."
 fi
 
 if [[ -e "$MERGED_DIR" ]]; then

@@ -7,8 +7,10 @@
 # Existing output directories are never reused or overwritten. For a repeat run
 # choose a new OVERLAP_OUTPUT_ROOT. Same data files + seed select the same rows.
 # Outputs include summary_chunks.md/csv/json using the original 1024-response-
-# token bins, plus per_question_chunks.json and per-token arrays. SCORE_CHUNK_SIZE
-# controls forward-pass memory only; it does not change the diagnostic bins.
+# token bins, plus per_question_chunks.json, per-token arrays, and a
+# mechanism-analysis directory containing sparse-union cosine and log-prob gaps.
+# SCORE_CHUNK_SIZE controls forward-pass memory only; it does not change the
+# diagnostic bins.
 # Requires the same OPD environment as eval-qwen3-1p7b-opd, with transformers,
 # pandas/pyarrow and vLLM. Does not submit training, merge models, or stop Ray.
 set -euo pipefail
@@ -28,6 +30,7 @@ TEACHER4B_PATH=${TEACHER4B_PATH:-$MODEL_ROOT/Qwen3-4B}
 TEACHER8B_PATH=${TEACHER8B_PATH:-$MODEL_ROOT/Qwen3-8B}
 TEACHER14B_PATH=${TEACHER14B_PATH:-$MODEL_ROOT/Qwen3-14B}
 QUESTIONS_PER_TASK=${QUESTIONS_PER_TASK:-5}
+SAMPLES_PER_QUESTION=${SAMPLES_PER_QUESTION:-1}
 SEED=${SEED:-42}
 # Match current puhui/eval-qwen3-1p7b-opd generation settings, not training length.
 MAX_TOKENS=${MAX_TOKENS:-38912}
@@ -62,7 +65,7 @@ ARGS=(
     --pair "stage2=$STAGE2_MODEL_PATH,$TEACHER8B_PATH"
     --pair "stage3=$STAGE3_MODEL_PATH,$TEACHER14B_PATH"
     --data-dir "$DATA_DIR" --output-root "$OVERLAP_OUTPUT_ROOT"
-    --questions-per-task "$QUESTIONS_PER_TASK" --seed "$SEED"
+    --questions-per-task "$QUESTIONS_PER_TASK" --samples-per-question "$SAMPLES_PER_QUESTION" --seed "$SEED"
     --max-tokens "$MAX_TOKENS" --temperature "$TEMPERATURE" --top-p "$TOP_P"
     --generation-top-k "$GENERATION_TOP_K" --ks 4 8 16
     --score-chunk-size "$SCORE_CHUNK_SIZE"

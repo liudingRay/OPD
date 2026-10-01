@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Same scientific budget as uniform3; independent LN-softmax experiment.
+set -euo pipefail
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+export MULTITEACHER_STAGE=dynamic3
+export TEACHER_EMA_BETA=${TEACHER_EMA_BETA:-0.9}
+export TEACHER_SELECTION_TAU=${TEACHER_SELECTION_TAU:-0.1}
+exec bash "$SCRIPT_DIR/multiteacher-opd-quick80-4xa100"

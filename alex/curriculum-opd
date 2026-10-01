@@ -8,10 +8,12 @@
 #   bash alex/curriculum-opd stage1
 #   bash alex/curriculum-opd stage2
 #   bash alex/curriculum-opd stage3
+#   bash alex/curriculum-opd uniform3
 #   SMOKE=1 bash alex/curriculum-opd stage1  # one complete training step
 #
-# Each stage consumes the separately merged Hugging Face model from the
-# previous stage. This script trains only; it never merges a checkpoint.
+# Each curriculum stage consumes the separately merged Hugging Face model from
+# the previous stage. uniform3 is an independent control from the official
+# student. This script trains only; it never merges a checkpoint.
 
 #SBATCH --job-name=curriculum-opd
 #SBATCH --partition=a100
@@ -27,6 +29,8 @@
 set -euo pipefail
 
 STAGE=${1:-${STAGE:-}}
+MULTI_TEACHER=0
+JOB_NAME_PREFIX=curriculum-opd
 SMOKE=${SMOKE:-0}
 SMOKE_STEPS=${SMOKE_STEPS:-1}
 SMOKE_GPUS=${SMOKE_GPUS:-2}
@@ -53,11 +57,23 @@ case "$STAGE" in
         DEFAULT_ACTOR_MODEL_NAME=Qwen3-1.7B-OPD-4B-8B
         DEFAULT_REWARD_MODEL_NAME=Qwen3-14B
         ;;
+    uniform3|dynamic3)
+        DEFAULT_ACTOR_MODEL_NAME=Qwen3-1.7B
+        DEFAULT_REWARD_MODEL_NAME=Qwen3-4B-Qwen3-8B-Qwen3-14B
+        MULTI_TEACHER=1
+        JOB_NAME_PREFIX=multiteacher-opd
+        ;;
     *)
-        echo "Usage: bash alex/curriculum-opd {stage1|stage2|stage3}" >&2
+        echo "Usage: bash alex/curriculum-opd {stage1|stage2|stage3|uniform3|dynamic3}" >&2
         exit 2
         ;;
 esac
+TEACHER_WEIGHT_MODE=fixed
+TEACHER_EMA_BETA=${TEACHER_EMA_BETA:-0.9}
+TEACHER_SELECTION_TAU=${TEACHER_SELECTION_TAU:-0.1}
+if [[ "$STAGE" == dynamic3 ]]; then
+    TEACHER_WEIGHT_MODE=ln_softmax
+fi
 ACTOR_MODEL_NAME=${ACTOR_MODEL_NAME:-$DEFAULT_ACTOR_MODEL_NAME}
 REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-$DEFAULT_REWARD_MODEL_NAME}
 
@@ -78,7 +94,20 @@ EXPERIMENT_ROOT=${EXPERIMENT_ROOT:-$OPD_WS/experiments/OPD}
 # overridable so a verified merged checkpoint can be stored elsewhere without
 # changing the experiment identity.
 ACTOR_MODEL_PATH=${ACTOR_MODEL_PATH:-$MODEL_ROOT/$ACTOR_MODEL_NAME}
-REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-$MODEL_ROOT/$REWARD_MODEL_NAME}
+if [[ "$MULTI_TEACHER" == 1 ]]; then
+    TEACHER4B_PATH=${TEACHER4B_PATH:-$MODEL_ROOT/Qwen3-4B}
+    TEACHER8B_PATH=${TEACHER8B_PATH:-$MODEL_ROOT/Qwen3-8B}
+    TEACHER14B_PATH=${TEACHER14B_PATH:-$MODEL_ROOT/Qwen3-14B}
+    REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-$TEACHER4B_PATH}
+    REWARD_MODEL_PATHS_CONFIG="[$TEACHER4B_PATH,$TEACHER8B_PATH,$TEACHER14B_PATH]"
+    TEACHER_NAMES_CONFIG='[Qwen3-4B,Qwen3-8B,Qwen3-14B]'
+    TEACHER_WEIGHTS_CONFIG='[1.0,1.0,1.0]'
+else
+    REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-$MODEL_ROOT/$REWARD_MODEL_NAME}
+    REWARD_MODEL_PATHS_CONFIG=null
+    TEACHER_NAMES_CONFIG=null
+    TEACHER_WEIGHTS_CONFIG=null
+fi
 
 TRAIN_DATASET=$PROJECT_DIR/datasets/dapo-math-17k.parquet
 TRAIN_DATASET_NAME=DAPO-Math-17k
@@ -140,13 +169,31 @@ LOG_PROB_TOP_K=${LOG_PROB_TOP_K:-16}
 TOP_K_STRATEGY=${TOP_K_STRATEGY:-only_stu}
 REWARD_WEIGHT_MODE=${REWARD_WEIGHT_MODE:-student_p}
 
+if [[ "$MULTI_TEACHER" == 1 ]] &&
+    { (( LOG_PROB_TOP_K <= 0 )) || [[ "$TOP_K_STRATEGY" != only_stu || "$REWARD_WEIGHT_MODE" != student_p ]]; }; then
+    echo "uniform3 requires LOG_PROB_TOP_K>0, TOP_K_STRATEGY=only_stu, and REWARD_WEIGHT_MODE=student_p." >&2
+    exit 2
+fi
+
 MAX_MODEL_LEN=$((MAX_PROMPT_LENGTH + (MAX_RESP_LENGTH > MAX_VAL_RESP_LENGTH ? MAX_RESP_LENGTH : MAX_VAL_RESP_LENGTH)))
 if (( PPO_MAX_TOKEN_LEN_PER_GPU < MAX_MODEL_LEN )); then
     echo "PPO_MAX_TOKEN_LEN_PER_GPU=$PPO_MAX_TOKEN_LEN_PER_GPU must be at least MAX_MODEL_LEN=$MAX_MODEL_LEN." >&2
     exit 1
 fi
 
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-token_reward_direct_${TRAIN_DATASET_NAME}_curriculum-${STAGE}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_r${MAX_RESP_LENGTH}-T${TEMPERATURE}-n${N_RESPONSES}-genk${GENERATION_TOP_K}-topp${TOP_P}-opdk${LOG_PROB_TOP_K}-${TOP_K_STRATEGY}${EXPERIMENT_SUFFIX}}
+if [[ "$MULTI_TEACHER" == 1 ]]; then
+    EXPERIMENT_FAMILY=multiteacher-uniform
+    if [[ "$STAGE" == dynamic3 ]]; then
+        EXPERIMENT_FAMILY=multiteacher-ln-softmax-b${TEACHER_EMA_BETA}-tau${TEACHER_SELECTION_TAU}
+    fi
+else
+    EXPERIMENT_FAMILY=curriculum-${STAGE}
+fi
+DEFAULT_EXPERIMENT_NAME=token_reward_direct_${TRAIN_DATASET_NAME}_${EXPERIMENT_FAMILY}
+DEFAULT_EXPERIMENT_NAME+=_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_r${MAX_RESP_LENGTH}
+DEFAULT_EXPERIMENT_NAME+=-T${TEMPERATURE}-n${N_RESPONSES}-genk${GENERATION_TOP_K}-topp${TOP_P}
+DEFAULT_EXPERIMENT_NAME+=-opdk${LOG_PROB_TOP_K}-${TOP_K_STRATEGY}${EXPERIMENT_SUFFIX}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-$DEFAULT_EXPERIMENT_NAME}
 CKPT_PATH=$EXPERIMENT_ROOT/checkpoints/$EXPERIMENT_NAME
 VALIDATION_DIR=$EXPERIMENT_ROOT/validation/$EXPERIMENT_NAME
 LOG_DIR=${LOG_DIR:-$EXPERIMENT_ROOT/logs}
@@ -186,25 +233,41 @@ require_hf_model() {
 require_dir "$PROJECT_DIR"
 require_file "$OPD_ENV/bin/activate"
 require_hf_model "$ACTOR_MODEL_PATH"
-require_hf_model "$REWARD_MODEL_PATH"
+if [[ "$MULTI_TEACHER" == 1 ]]; then
+    require_hf_model "$TEACHER4B_PATH"
+    require_hf_model "$TEACHER8B_PATH"
+    require_hf_model "$TEACHER14B_PATH"
+else
+    require_hf_model "$REWARD_MODEL_PATH"
+fi
 require_file "$TRAIN_DATASET"
 for task in AIME25 AMC23 AIME24; do
     require_file "$PROJECT_DIR/datasets/test_data/$task/test.parquet"
 done
 
 print_configuration() {
-    echo "Alex curriculum OPD configuration"
-    echo "  stage:         $STAGE"
+    echo "Alex OPD configuration"
+    echo "  mode:          $STAGE"
     echo "  smoke:         $SMOKE"
     echo "  workspace:     $OPD_WS"
     echo "  project:       $PROJECT_DIR"
     echo "  environment:   $OPD_ENV"
     echo "  student:       $ACTOR_MODEL_PATH"
-    echo "  teacher:       $REWARD_MODEL_PATH"
+    if [[ "$MULTI_TEACHER" == 1 ]]; then
+        echo "  teachers:      $TEACHER4B_PATH, $TEACHER8B_PATH, $TEACHER14B_PATH"
+        if [[ "$TEACHER_WEIGHT_MODE" == ln_softmax ]]; then
+            echo "  weights:       dynamic softmax(L*JS/tau), no fixed teacher prior"
+        else
+        echo "  weights:       1/3, 1/3, 1/3 (normalized from $TEACHER_WEIGHTS_CONFIG)"
+        fi
+    else
+        echo "  teacher:       $REWARD_MODEL_PATH"
+    fi
     echo "  experiment:    $EXPERIMENT_NAME"
     echo "  checkpoints:   $CKPT_PATH"
     echo "  validation:    $VALIDATION_DIR"
     echo "  resources:     1 node, $SBATCH_GPUS x A100-80GB, $SBATCH_CPUS CPUs, time=$SBATCH_TIME"
+    echo "  teacher mix:   $TEACHER_WEIGHT_MODE, trajectory EMA beta=$TEACHER_EMA_BETA, tau=$TEACHER_SELECTION_TAU"
     echo "  resume mode:   $TRAINER_RESUME_MODE"
     echo "  thinking:      enabled"
     echo "  lengths:       prompt=$MAX_PROMPT_LENGTH, train_response=$MAX_RESP_LENGTH, val_response=$MAX_VAL_RESP_LENGTH"
@@ -244,7 +307,7 @@ if [[ -z ${SLURM_JOB_ID:-} ]]; then
         --time="$SBATCH_TIME" \
         --gres="gpu:a100:$SBATCH_GPUS" \
         --cpus-per-task="$SBATCH_CPUS" \
-        --job-name="curriculum-opd-$STAGE${EXPERIMENT_SUFFIX}" \
+        --job-name="$JOB_NAME_PREFIX-$STAGE${EXPERIMENT_SUFFIX}" \
         --output="$LOG_DIR/%x-%j.out" \
         --error="$LOG_DIR/%x-%j.err" \
         "$SCRIPT_PATH" "$STAGE"
@@ -388,7 +451,7 @@ record_job_exit() {
     else
         echo "Job exit: FAILURE (code $status) at $(date --iso-8601=seconds)" >&2
         echo "Inspect the full training log: $LOG_FILE" >&2
-        echo "Inspect Slurm logs: $LOG_DIR/curriculum-opd-$STAGE-$SLURM_JOB_ID.out and .err" >&2
+        echo "Inspect Slurm logs: $LOG_DIR/${SLURM_JOB_NAME:-$JOB_NAME_PREFIX-$STAGE}-$SLURM_JOB_ID.out and .err" >&2
     fi
     exit "$status"
 }
@@ -482,6 +545,12 @@ python -m verl.trainer.main_ppo \
     "actor_rollout_ref.rollout.calculate_log_probs=True" \
     "actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1" \
     "reward_model.enable=True" \
+    "reward_model.teacher_weight_mode=$TEACHER_WEIGHT_MODE" \
+    "reward_model.teacher_ema_beta=$TEACHER_EMA_BETA" \
+    "reward_model.teacher_selection_tau=$TEACHER_SELECTION_TAU" \
+    "reward_model.model_paths=$REWARD_MODEL_PATHS_CONFIG" \
+    "reward_model.teacher_names=$TEACHER_NAMES_CONFIG" \
+    "reward_model.teacher_weights=$TEACHER_WEIGHTS_CONFIG" \
     "+reward_model.reward_kwargs.enable_format_reward=False" \
     "reward_model.model.path=$REWARD_MODEL_PATH" \
     "reward_model.model.input_tokenizer=null" \
