@@ -11,6 +11,7 @@ It never generates a new response and never overwrites an output directory.
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import html
 import json
@@ -268,15 +269,19 @@ def _is_semantic_token(decoded_piece: str) -> bool:
     )
 
 
-def _semantic_unit(tokenizer, token_ids, token_pieces, position):
+def _semantic_unit(tokenizer, token_ids, token_pieces, position, math_delimiters=None):
     """Expand one high-EU piece to its surrounding word or bounded math expression."""
-    left_math = next((i for i in range(position - 1, max(-1, position - 40), -1) if "$" in token_pieces[i]), None)
-    right_math = next(
-        (i for i in range(position + 1, min(len(token_pieces), position + 40)) if "$" in token_pieces[i]), None
+    delimiters = (
+        math_delimiters
+        if math_delimiters is not None
+        else [index for index, piece in enumerate(token_pieces) if "$" in piece]
     )
+    delimiter_slot = bisect.bisect_left(delimiters, position)
+    left_math = delimiters[delimiter_slot - 1] if delimiter_slot % 2 else None
+    right_math = delimiters[delimiter_slot] if left_math is not None and delimiter_slot < len(delimiters) else None
     if left_math is not None and right_math is not None:
         expression = _decode(tokenizer, token_ids[left_math : right_math + 1].tolist()).strip()
-        if len(expression) <= 180:
+        if right_math - left_math <= 80 and len(expression) <= 180:
             return expression, left_math, right_math + 1
 
     left = position
@@ -501,6 +506,7 @@ def analyze_output(root: Path, tokenizer, plot_specs: list[str], top_n: int):
             raise ValueError(f"Misaligned joined token file: {path}")
         token_strings = tokenizer.convert_ids_to_tokens(token_ids.tolist())
         readable_pieces = [_readable_token_piece(piece) for piece in token_strings]
+        math_delimiters = [position for position, piece in enumerate(readable_pieces) if "$" in piece]
         thresholds, sorted_values, top_positions, highlighted = [], [], [], set()
         for teacher_index, name in enumerate(names):
             values = eu[:, teacher_index][valid]
@@ -572,7 +578,7 @@ def analyze_output(root: Path, tokenizer, plot_specs: list[str], top_n: int):
                 continue
             decoded_piece = _decode(tokenizer, [int(token_ids[position])])
             semantic_unit, semantic_start, semantic_end = _semantic_unit(
-                tokenizer, token_ids, readable_pieces, position
+                tokenizer, token_ids, readable_pieces, position, math_delimiters
             )
             context_ids = token_ids[max(0, semantic_start - 10) : min(len(token_ids), semantic_end + 10)].tolist()
             semantic_row = {

@@ -164,6 +164,10 @@ def test_semantic_unit_expands_wordpieces_and_math():
         7,
         20,
     )
+    prose_ids = list(b"$x$ ordinary words $y$")
+    prose_pieces = [bytes([value]).decode() for value in prose_ids]
+    word = bytes(prose_ids).index(b"words")
+    assert evaluator._semantic_unit(tokenizer, np.asarray(prose_ids), prose_pieces, word) == ("words", 13, 18)
 
 
 def test_extended_statistics_keeps_nonfinite_counts_and_quantiles():
