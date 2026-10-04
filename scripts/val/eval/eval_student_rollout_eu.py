@@ -277,7 +277,7 @@ def _semantic_unit(tokenizer, token_ids, token_pieces, position):
     if left_math is not None and right_math is not None:
         expression = _decode(tokenizer, token_ids[left_math : right_math + 1].tolist()).strip()
         if len(expression) <= 180:
-            return expression
+            return expression, left_math, right_math + 1
 
     left = position
     while left > 0 and position - left < 8 and token_pieces[left] and not token_pieces[left][0].isspace():
@@ -293,7 +293,45 @@ def _semantic_unit(tokenizer, token_ids, token_pieces, position):
         if not piece or piece[0].isspace() or (not piece[0].isalnum() and piece[0] not in "_-'"):
             break
         right += 1
-    return _decode(tokenizer, token_ids[left:right].tolist()).strip()
+    return _decode(tokenizer, token_ids[left:right].tolist()).strip(), left, right
+
+
+def _merge_semantic_rows(rows, names):
+    grouped = {}
+    for row in rows:
+        key = (row["trajectory_index"], row["semantic_start"], row["semantic_end_exclusive"])
+        grouped.setdefault(key, []).append(row)
+    merged = []
+    for group in grouped.values():
+        first = group[0]
+        row = {
+            key: first[key]
+            for key in (
+                "trajectory_index",
+                "trajectory_uid",
+                "question_uid",
+                "response_index",
+                "semantic_start",
+                "semantic_end_exclusive",
+                "semantic_unit",
+                "context",
+            )
+        }
+        row["token_positions"] = ",".join(str(item["token_position"]) for item in group)
+        row["high_eu_tokens"] = " | ".join(dict.fromkeys(item["decoded_token"] for item in group))
+        row["high_eu_token_count"] = len(group)
+        for name in names:
+            best = max(group, key=lambda item: item[f"percentile_{name}"])
+            row[f"eu_{name}"] = best[f"eu_{name}"]
+            row[f"percentile_{name}"] = best[f"percentile_{name}"]
+        above_p95 = [name for name in names if row[f"percentile_{name}"] >= 95.0]
+        above_p90 = [name for name in names if row[f"percentile_{name}"] >= 90.0]
+        row["teachers_above_trajectory_p95"] = ",".join(above_p95)
+        row["teachers_above_trajectory_p90"] = ",".join(above_p90)
+        row["teacher_count_above_p95"] = len(above_p95)
+        row["teacher_count_above_p90"] = len(above_p90)
+        merged.append(row)
+    return merged
 
 
 def _teacher_value_cell(row, name):
@@ -451,7 +489,7 @@ def analyze_output(root: Path, tokenizer, plot_specs: list[str], top_n: int):
     analysis.mkdir(exist_ok=False)
     trajectory_reports.mkdir()
     global_values = [[] for _ in names]
-    stats_rows, high_rows, semantic_rows, pages = [], [], [], []
+    stats_rows, high_rows, semantic_rows, semantic_span_rows, pages = [], [], [], [], []
     for index, record in enumerate(records):
         path = root / "tokens" / f"trajectory-{index:06d}.npz"
         with np.load(path, allow_pickle=False) as content:
@@ -525,6 +563,7 @@ def analyze_output(root: Path, tokenizer, plot_specs: list[str], top_n: int):
                     **{f"percentile_{name}": percentiles[j] for j, name in enumerate(names)},
                 }
             )
+        trajectory_semantic_tokens = []
         for position, token_piece in enumerate(readable_pieces):
             percentiles = percentile_rows[position]
             above_p90 = [names[j] for j, value in enumerate(percentiles) if value is not None and value >= 90.0]
@@ -532,29 +571,34 @@ def analyze_output(root: Path, tokenizer, plot_specs: list[str], top_n: int):
             if not _is_semantic_token(token_piece) or (not above_p95 and len(above_p90) < 2):
                 continue
             decoded_piece = _decode(tokenizer, [int(token_ids[position])])
-            context_ids = token_ids[max(0, position - 10) : min(len(token_ids), position + 11)].tolist()
-            semantic_rows.append(
-                {
-                    "trajectory_index": index,
-                    "trajectory_uid": record["uid"],
-                    "question_uid": record["question_uid"],
-                    "response_index": record["response_index"],
-                    "token_position": position,
-                    "token_id": int(token_ids[position]),
-                    "token_string": token_strings[position],
-                    "decoded_token": decoded_piece.replace("\n", "\\n"),
-                    "semantic_unit": _semantic_unit(tokenizer, token_ids, readable_pieces, position).replace(
-                        "\n", "\\n"
-                    ),
-                    "context": _decode(tokenizer, context_ids).replace("\n", "\\n"),
-                    "teachers_above_trajectory_p95": ",".join(above_p95),
-                    "teachers_above_trajectory_p90": ",".join(above_p90),
-                    "teacher_count_above_p95": len(above_p95),
-                    "teacher_count_above_p90": len(above_p90),
-                    **{f"eu_{name}": float(eu[position, j]) for j, name in enumerate(names)},
-                    **{f"percentile_{name}": percentiles[j] for j, name in enumerate(names)},
-                }
+            semantic_unit, semantic_start, semantic_end = _semantic_unit(
+                tokenizer, token_ids, readable_pieces, position
             )
+            context_ids = token_ids[max(0, semantic_start - 10) : min(len(token_ids), semantic_end + 10)].tolist()
+            semantic_row = {
+                "trajectory_index": index,
+                "trajectory_uid": record["uid"],
+                "question_uid": record["question_uid"],
+                "response_index": record["response_index"],
+                "token_position": position,
+                "token_id": int(token_ids[position]),
+                "token_string": token_strings[position],
+                "decoded_token": decoded_piece.replace("\n", "\\n"),
+                "semantic_start": semantic_start,
+                "semantic_end_exclusive": semantic_end,
+                "semantic_unit": semantic_unit.replace("\n", "\\n"),
+                "context": _decode(tokenizer, context_ids).replace("\n", "\\n"),
+                "teachers_above_trajectory_p95": ",".join(above_p95),
+                "teachers_above_trajectory_p90": ",".join(above_p90),
+                "teacher_count_above_p95": len(above_p95),
+                "teacher_count_above_p90": len(above_p90),
+                **{f"eu_{name}": float(eu[position, j]) for j, name in enumerate(names)},
+                **{f"percentile_{name}": percentiles[j] for j, name in enumerate(names)},
+            }
+            semantic_rows.append(semantic_row)
+            trajectory_semantic_tokens.append(semantic_row)
+        trajectory_semantic_spans = _merge_semantic_rows(trajectory_semantic_tokens, names)
+        semantic_span_rows.extend(trajectory_semantic_spans)
         if index in selected:
             svg_name = f"trajectory-{index:06d}.svg"
             html_name = f"trajectory-{index:06d}.html"
@@ -563,14 +607,13 @@ def analyze_output(root: Path, tokenizer, plot_specs: list[str], top_n: int):
             )
             trajectory_stats = [row for row in stats_rows if row["trajectory_index"] == index]
             trajectory_high = [row for row in high_rows if row["trajectory_index"] == index]
-            trajectory_semantic = [row for row in semantic_rows if row["trajectory_index"] == index]
             semantic_table_rows = "".join(
                 "<tr>"
                 + "".join(
                     f"<td>{html.escape(str(row[key]))}</td>"
                     for key in (
-                        "token_position",
-                        "decoded_token",
+                        "token_positions",
+                        "high_eu_tokens",
                         "semantic_unit",
                         "context",
                         "teachers_above_trajectory_p95",
@@ -579,7 +622,7 @@ def analyze_output(root: Path, tokenizer, plot_specs: list[str], top_n: int):
                 )
                 + "".join(f"<td>{_teacher_value_cell(row, name)}</td>" for name in names)
                 + "</tr>"
-                for row in trajectory_semantic
+                for row in trajectory_semantic_spans
             )
             table_rows = "".join(
                 "<tr>"
@@ -620,7 +663,8 @@ pre{{white-space:pre-wrap;background:#f6f8fa;padding:12px}}
 <p>Formatting-only Markdown/LaTeX pieces are excluded. A content token appears when any teacher is at or above
 its trajectory p95, or at least two teachers are at or above their own trajectory p90. Values are raw EU followed
 by the within-teacher trajectory percentile in parentheses.</p>
-<table><tr><th>Position</th><th>High-EU token</th><th>Semantic unit</th><th>Context</th><th>Teachers &ge; p95</th>
+<table><tr><th>Positions</th><th>High-EU tokens</th><th>Semantic unit</th><th>Context</th>
+<th>Teachers &ge; p95</th>
 <th>Teachers &ge; p90</th>{''.join(f'<th>{html.escape(name)} EU (percentile)</th>' for name in names)}</tr>
 {semantic_table_rows}</table>
 <h2>Raw top-{top_n} EU tokens</h2>
@@ -645,6 +689,9 @@ by the within-teacher trajectory percentile in parentheses.</p>
     semantic_fields = list(semantic_rows[0]) if semantic_rows else []
     if semantic_fields:
         write_csv(analysis / "semantic_high_eu_tokens.csv", semantic_rows, semantic_fields)
+    semantic_span_fields = list(semantic_span_rows[0]) if semantic_span_rows else []
+    if semantic_span_fields:
+        write_csv(analysis / "semantic_high_eu_spans.csv", semantic_span_rows, semantic_span_fields)
     (analysis / "teacher_distribution.svg").write_text(
         distribution_svg(flattened, names), encoding="utf-8"
     )
@@ -673,7 +720,7 @@ This report covers the visible response text reconstructed losslessly with the o
 <th>p90</th><th>p95</th><th>Max</th></tr>{summary_table}</table>
 <h2>Selected trajectory reports</h2><ul>{links}</ul>
 <p>Machine-readable files: teacher_summary.json, per_trajectory_teacher_stats.csv/json,
-semantic_high_eu_tokens.csv, and the legacy raw top-N high_eu_tokens.csv.</p>"""
+semantic_high_eu_tokens.csv, merged semantic_high_eu_spans.csv, and the legacy raw top-N high_eu_tokens.csv.</p>"""
     (analysis / "report.html").write_text(report, encoding="utf-8")
     write_json(
         analysis / "ANALYSIS_COMPLETED.json",
@@ -683,6 +730,7 @@ semantic_high_eu_tokens.csv, and the legacy raw top-N high_eu_tokens.csv.</p>"""
             "high_token_top_n_per_teacher": top_n,
             "semantic_high_eu_rule": "content token with any teacher >= trajectory p95 or at least two >= p90",
             "semantic_high_eu_tokens": len(semantic_rows),
+            "semantic_high_eu_spans": len(semantic_span_rows),
         },
     )
 
