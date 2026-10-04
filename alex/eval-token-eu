@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# Reuse saved student trajectories; score raw token-level EU with 4B/8B/14B.
+# Required: TRAJECTORIES_FILE=/absolute/pair/trajectories.json
+# DRY_RUN=1 performs only CPU preflight; no generation or training at any stage.
+#SBATCH --job-name=eval-token-eu
+#SBATCH --partition=a100
+#SBATCH --constraint=a100_80
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:a100:1
+#SBATCH --cpus-per-task=8
+#SBATCH --time=24:00:00
+
+set -euo pipefail
+
+if [[ -z ${OPD_WS:-} ]]; then
+    command -v ws_find >/dev/null 2>&1 || { echo "Run on Alex or set OPD_WS explicitly." >&2; exit 1; }
+    OPD_WS=$(ws_find opd)
+fi
+[[ -n "$OPD_WS" && -d "$OPD_WS" ]] || { echo "Invalid OPD_WS: $OPD_WS" >&2; exit 1; }
+PROJECT_DIR=${PROJECT_DIR:-$OPD_WS/OPD}
+OPD_ENV=${OPD_ENV:-$OPD_WS/envs/opd-py312}
+MODEL_ROOT=${MODEL_ROOT:-$OPD_WS/models}
+EXPERIMENT_ROOT=${EXPERIMENT_ROOT:-$OPD_WS/experiments/OPD}
+OPD_CACHE_ROOT=${OPD_CACHE_ROOT:-$OPD_WS/.cache/opd}
+LOG_DIR=${LOG_DIR:-$EXPERIMENT_ROOT/logs}
+TEACHER4B_PATH=${TEACHER4B_PATH:-$MODEL_ROOT/Qwen3-4B}
+TEACHER8B_PATH=${TEACHER8B_PATH:-$MODEL_ROOT/Qwen3-8B}
+TEACHER14B_PATH=${TEACHER14B_PATH:-$MODEL_ROOT/Qwen3-14B}
+TOKENIZER_PATH=${TOKENIZER_PATH:-}
+SCORE_CHUNK_SIZE=${SCORE_CHUNK_SIZE:-128}
+JOB_NAME=${JOB_NAME:-eval-token-eu}
+: "${TRAJECTORIES_FILE:?Set TRAJECTORIES_FILE to one saved pair directory or its trajectories.json}"
+if [[ -d "$TRAJECTORIES_FILE" ]]; then
+    TRAJECTORIES_FILE="$TRAJECTORIES_FILE/trajectories.json"
+fi
+[[ "$TRAJECTORIES_FILE" == /* && -f "$TRAJECTORIES_FILE" ]] || {
+    echo "TRAJECTORIES_FILE must identify an existing absolute trajectories.json path." >&2; exit 1;
+}
+SOURCE_LABEL=$(basename "$(dirname "$TRAJECTORIES_FILE")")
+EU_OUTPUT_ROOT=${EU_OUTPUT_ROOT:-$EXPERIMENT_ROOT/evaluation/token-eu-${SOURCE_LABEL}-$(date +%Y%m%d-%H%M%S)}
+[[ "$EU_OUTPUT_ROOT" == /* && ! -e "$EU_OUTPUT_ROOT" ]] || {
+    echo "EU_OUTPUT_ROOT must be a new absolute directory: $EU_OUTPUT_ROOT" >&2; exit 1;
+}
+for file in "$OPD_ENV/bin/activate" "$PROJECT_DIR/scripts/val/eval/eval_token_eu.py" \
+    "$PROJECT_DIR/scripts/val/eval/eval_fixed_overlap.py" "$PROJECT_DIR/verl/verl/utils/epistemic_uncertainty.py"; do
+    [[ -f "$file" ]] || { echo "Required file missing: $file" >&2; exit 1; }
+done
+for model in "$TEACHER4B_PATH" "$TEACHER8B_PATH" "$TEACHER14B_PATH"; do
+    [[ "$model" == /* && -f "$model/config.json" ]] || { echo "Invalid teacher path: $model" >&2; exit 1; }
+    compgen -G "$model/model*.safetensors" >/dev/null || { echo "Teacher weights missing: $model" >&2; exit 1; }
+done
+ARGS=(--trajectories "$TRAJECTORIES_FILE" --output-root "$EU_OUTPUT_ROOT"
+      --teacher-4b "$TEACHER4B_PATH" --teacher-8b "$TEACHER8B_PATH" --teacher-14b "$TEACHER14B_PATH"
+      --score-chunk-size "$SCORE_CHUNK_SIZE")
+if [[ -n "$TOKENIZER_PATH" ]]; then
+    [[ "$TOKENIZER_PATH" == /* && -d "$TOKENIZER_PATH" ]] || {
+        echo "TOKENIZER_PATH must be the original student's absolute tokenizer directory." >&2; exit 1;
+    }
+    ARGS+=(--tokenizer-path "$TOKENIZER_PATH")
+fi
+
+module purge
+module load cuda/12.8.1
+source "$OPD_ENV/bin/activate"
+export CUDA_HOME
+CUDA_HOME=$(dirname "$(dirname "$(command -v nvcc)")")
+export PATH="$OPD_ENV/bin:$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export HF_HOME="$OPD_CACHE_ROOT/huggingface"
+export HF_HUB_CACHE="$HF_HOME/hub"
+export HF_HUB_OFFLINE=1
+export XDG_CACHE_HOME="$OPD_CACHE_ROOT/xdg-cache"
+export TRITON_CACHE_DIR="$OPD_CACHE_ROOT/triton"
+export TORCHINDUCTOR_CACHE_DIR="$OPD_CACHE_ROOT/torchinductor"
+export TORCH_EXTENSIONS_DIR="$OPD_CACHE_ROOT/torch-extensions"
+export TOKENIZERS_PARALLELISM=false
+export PYTHONUNBUFFERED=1
+export PYTHONDONTWRITEBYTECODE=1
+unset ROCR_VISIBLE_DEVICES
+
+if [[ -z ${SLURM_JOB_ID:-} || ${DRY_RUN:-0} == 1 ]]; then
+    python "$PROJECT_DIR/scripts/val/eval/eval_token_eu.py" "${ARGS[@]}" --dry-run
+    if [[ ${DRY_RUN:-0} == 1 ]]; then
+        echo "DRY_RUN=1: no job submitted, no generation, and no model weights loaded."
+        exit 0
+    fi
+    mkdir -p "$LOG_DIR"
+    export OPD_WS PROJECT_DIR OPD_ENV MODEL_ROOT EXPERIMENT_ROOT OPD_CACHE_ROOT LOG_DIR
+    export TEACHER4B_PATH TEACHER8B_PATH TEACHER14B_PATH TOKENIZER_PATH SCORE_CHUNK_SIZE
+    export TRAJECTORIES_FILE EU_OUTPUT_ROOT JOB_NAME
+    exec sbatch --export=ALL --job-name="$JOB_NAME" \
+        --output="$LOG_DIR/%x-%j.out" --error="$LOG_DIR/%x-%j.err" "$(realpath "$0")"
+fi
+
+if [[ ! ${CUDA_VISIBLE_DEVICES:-} =~ ^[0-9]+$ ]]; then
+    echo "Expected one numeric GPU ID allocated by Slurm, got ${CUDA_VISIBLE_DEVICES:-unset}" >&2; exit 1
+fi
+export TMPDIR=${TMPDIR:-/tmp/${SLURM_JOB_ID}.alex-eu}
+mkdir -p "$TMPDIR" "$HF_HUB_CACHE" "$XDG_CACHE_HOME" "$TRITON_CACHE_DIR" \
+    "$TORCHINDUCTOR_CACHE_DIR" "$TORCH_EXTENSIONS_DIR"
+cd "$PROJECT_DIR"
+echo "Start: $(date --iso-8601=seconds), job=$SLURM_JOB_ID, nodes=${SLURM_JOB_NODELIST:-unknown}"
+echo "Trajectories: $TRAJECTORIES_FILE"
+echo "Output: $EU_OUTPUT_ROOT; raw top-16 EU; chunk=$SCORE_CHUNK_SIZE; teachers run sequentially"
+python --version
+python -m pip check
+nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu --format=csv,noheader
+exec python "$PROJECT_DIR/scripts/val/eval/eval_token_eu.py" "${ARGS[@]}"
