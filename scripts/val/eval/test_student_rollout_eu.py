@@ -168,6 +168,10 @@ def test_semantic_unit_expands_wordpieces_and_math():
     prose_pieces = [bytes([value]).decode() for value in prose_ids]
     word = bytes(prose_ids).index(b"words")
     assert evaluator._semantic_unit(tokenizer, np.asarray(prose_ids), prose_pieces, word) == ("words", 13, 18)
+    display_ids = list(b"$$x$$ words")
+    display_pieces = [bytes([value]).decode() for value in display_ids]
+    assert evaluator._math_delimiter_spans(display_pieces) == [(0, 2), (3, 5)]
+    assert evaluator._semantic_unit(tokenizer, np.asarray(display_ids), display_pieces, 2) == ("$$x$$", 0, 5)
 
 
 def test_extended_statistics_keeps_nonfinite_counts_and_quantiles():

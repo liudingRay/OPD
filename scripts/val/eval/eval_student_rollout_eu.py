@@ -269,20 +269,37 @@ def _is_semantic_token(decoded_piece: str) -> bool:
     )
 
 
+def _math_delimiter_spans(token_pieces):
+    spans = []
+    previous_piece = ""
+    for index, piece in enumerate(token_pieces):
+        stripped = piece.strip()
+        if "$" not in stripped:
+            previous_piece = stripped
+            continue
+        if spans and spans[-1][1] == index and previous_piece.endswith("$") and stripped.startswith("$"):
+            spans[-1] = (spans[-1][0], index + 1)
+        else:
+            spans.append((index, index + 1))
+        previous_piece = stripped
+    return spans
+
+
 def _semantic_unit(tokenizer, token_ids, token_pieces, position, math_delimiters=None):
     """Expand one high-EU piece to its surrounding word or bounded math expression."""
     delimiters = (
         math_delimiters
         if math_delimiters is not None
-        else [index for index, piece in enumerate(token_pieces) if "$" in piece]
+        else _math_delimiter_spans(token_pieces)
     )
-    delimiter_slot = bisect.bisect_left(delimiters, position)
+    delimiter_starts = [start for start, _ in delimiters]
+    delimiter_slot = bisect.bisect_left(delimiter_starts, position)
     left_math = delimiters[delimiter_slot - 1] if delimiter_slot % 2 else None
     right_math = delimiters[delimiter_slot] if left_math is not None and delimiter_slot < len(delimiters) else None
     if left_math is not None and right_math is not None:
-        expression = _decode(tokenizer, token_ids[left_math : right_math + 1].tolist()).strip()
-        if right_math - left_math <= 80 and len(expression) <= 180:
-            return expression, left_math, right_math + 1
+        expression = _decode(tokenizer, token_ids[left_math[0] : right_math[1]].tolist()).strip()
+        if right_math[1] - left_math[0] <= 80 and len(expression) <= 180:
+            return expression, left_math[0], right_math[1]
 
     left = position
     while left > 0 and position - left < 8 and token_pieces[left] and not token_pieces[left][0].isspace():
@@ -506,7 +523,7 @@ def analyze_output(root: Path, tokenizer, plot_specs: list[str], top_n: int):
             raise ValueError(f"Misaligned joined token file: {path}")
         token_strings = tokenizer.convert_ids_to_tokens(token_ids.tolist())
         readable_pieces = [_readable_token_piece(piece) for piece in token_strings]
-        math_delimiters = [position for position, piece in enumerate(readable_pieces) if "$" in piece]
+        math_delimiters = _math_delimiter_spans(readable_pieces)
         thresholds, sorted_values, top_positions, highlighted = [], [], [], set()
         for teacher_index, name in enumerate(names):
             values = eu[:, teacher_index][valid]
