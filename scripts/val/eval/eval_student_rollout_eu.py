@@ -26,6 +26,21 @@ from eval_fixed_overlap import file_hash, read_json, tokenizer_signature, write_
 
 
 COLORS = ("#2563eb", "#dc2626", "#059669")
+SEMANTIC_LATEX_SCAFFOLDING = {
+    "begin",
+    "big",
+    "bigg",
+    "boxed",
+    "displaystyle",
+    "end",
+    "frac",
+    "left",
+    "mathbf",
+    "mathrm",
+    "right",
+    "text",
+}
+SEMANTIC_MATH_SYMBOLS = frozenset("+-−×÷*/=<>≤≥±∑√^")
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -231,6 +246,60 @@ def _number(value):
     return "N/A" if value is None or not math.isfinite(value) else f"{value:.6g}"
 
 
+def _readable_token_piece(token_piece: str) -> str:
+    return token_piece.replace("Ġ", " ").replace("Ċ", "\n").replace("ĉ", "\t")
+
+
+def _is_semantic_token(decoded_piece: str) -> bool:
+    """Keep content-bearing pieces while dropping Markdown/LaTeX scaffolding."""
+    piece = _readable_token_piece(decoded_piece).strip()
+    if not piece:
+        return False
+    normalized = piece.strip("*_`#")
+    if not normalized or normalized in {"$", "$$", "\\", "{", "}", "}{", "[", "]", "(", ")"}:
+        return False
+    command = normalized.lstrip("\\")
+    if command in SEMANTIC_LATEX_SCAFFOLDING:
+        return False
+    if len(normalized) > 1 and set(normalized) <= set("-_*`#"):
+        return False
+    return any(character.isalnum() for character in normalized) or any(
+        character in SEMANTIC_MATH_SYMBOLS for character in normalized
+    )
+
+
+def _semantic_unit(tokenizer, token_ids, token_pieces, position):
+    """Expand one high-EU piece to its surrounding word or bounded math expression."""
+    left_math = next((i for i in range(position - 1, max(-1, position - 40), -1) if "$" in token_pieces[i]), None)
+    right_math = next(
+        (i for i in range(position + 1, min(len(token_pieces), position + 40)) if "$" in token_pieces[i]), None
+    )
+    if left_math is not None and right_math is not None:
+        expression = _decode(tokenizer, token_ids[left_math : right_math + 1].tolist()).strip()
+        if len(expression) <= 180:
+            return expression
+
+    left = position
+    while left > 0 and position - left < 8 and token_pieces[left] and not token_pieces[left][0].isspace():
+        previous = token_pieces[left - 1]
+        if not previous or (not previous[-1].isalnum() and previous[-1] not in "_-'"):
+            break
+        left -= 1
+        if previous[0].isspace():
+            break
+    right = position + 1
+    while right < len(token_pieces) and right - position < 8:
+        piece = token_pieces[right]
+        if not piece or piece[0].isspace() or (not piece[0].isalnum() and piece[0] not in "_-'"):
+            break
+        right += 1
+    return _decode(tokenizer, token_ids[left:right].tolist()).strip()
+
+
+def _teacher_value_cell(row, name):
+    return f"{_number(row[f'eu_{name}'])} ({_number(row[f'percentile_{name}'])}%)"
+
+
 def _map(value, low, high, start, width):
     if high <= low:
         return start + width / 2
@@ -382,7 +451,7 @@ def analyze_output(root: Path, tokenizer, plot_specs: list[str], top_n: int):
     analysis.mkdir(exist_ok=False)
     trajectory_reports.mkdir()
     global_values = [[] for _ in names]
-    stats_rows, high_rows, pages = [], [], []
+    stats_rows, high_rows, semantic_rows, pages = [], [], [], []
     for index, record in enumerate(records):
         path = root / "tokens" / f"trajectory-{index:06d}.npz"
         with np.load(path, allow_pickle=False) as content:
@@ -393,6 +462,7 @@ def analyze_output(root: Path, tokenizer, plot_specs: list[str], top_n: int):
         if stored_names != names or eu.shape != (len(token_ids), len(names)) or valid.shape != (len(token_ids),):
             raise ValueError(f"Misaligned joined token file: {path}")
         token_strings = tokenizer.convert_ids_to_tokens(token_ids.tolist())
+        readable_pieces = [_readable_token_piece(piece) for piece in token_strings]
         thresholds, sorted_values, top_positions, highlighted = [], [], [], set()
         for teacher_index, name in enumerate(names):
             values = eu[:, teacher_index][valid]
@@ -416,18 +486,24 @@ def analyze_output(root: Path, tokenizer, plot_specs: list[str], top_n: int):
             finite = np.sort(eu[finite_positions, teacher_index])
             sorted_values.append(finite)
             thresholds.append(float(np.quantile(finite, 0.9)) if finite.size else math.nan)
+        percentile_rows = [
+            [
+                (
+                    100.0 * np.searchsorted(sorted_values[j], eu[position, j], side="right") / len(sorted_values[j])
+                    if len(sorted_values[j]) and valid[position] and np.isfinite(eu[position, j])
+                    else None
+                )
+                for j in range(len(names))
+            ]
+            for position in range(len(token_ids))
+        ]
         for position in sorted(highlighted):
             selected_by = [
                 names[j]
                 for j in range(len(names))
                 if position in top_positions[j]
             ]
-            percentiles = [
-                (100.0 * np.searchsorted(sorted_values[j], eu[position, j], side="right") / len(sorted_values[j]))
-                if len(sorted_values[j]) and np.isfinite(eu[position, j])
-                else None
-                for j in range(len(names))
-            ]
+            percentiles = percentile_rows[position]
             high_flags = [
                 bool(np.isfinite(eu[position, j]) and eu[position, j] >= thresholds[j])
                 for j in range(len(names))
@@ -449,6 +525,36 @@ def analyze_output(root: Path, tokenizer, plot_specs: list[str], top_n: int):
                     **{f"percentile_{name}": percentiles[j] for j, name in enumerate(names)},
                 }
             )
+        for position, token_piece in enumerate(readable_pieces):
+            percentiles = percentile_rows[position]
+            above_p90 = [names[j] for j, value in enumerate(percentiles) if value is not None and value >= 90.0]
+            above_p95 = [names[j] for j, value in enumerate(percentiles) if value is not None and value >= 95.0]
+            if not _is_semantic_token(token_piece) or (not above_p95 and len(above_p90) < 2):
+                continue
+            decoded_piece = _decode(tokenizer, [int(token_ids[position])])
+            context_ids = token_ids[max(0, position - 10) : min(len(token_ids), position + 11)].tolist()
+            semantic_rows.append(
+                {
+                    "trajectory_index": index,
+                    "trajectory_uid": record["uid"],
+                    "question_uid": record["question_uid"],
+                    "response_index": record["response_index"],
+                    "token_position": position,
+                    "token_id": int(token_ids[position]),
+                    "token_string": token_strings[position],
+                    "decoded_token": decoded_piece.replace("\n", "\\n"),
+                    "semantic_unit": _semantic_unit(tokenizer, token_ids, readable_pieces, position).replace(
+                        "\n", "\\n"
+                    ),
+                    "context": _decode(tokenizer, context_ids).replace("\n", "\\n"),
+                    "teachers_above_trajectory_p95": ",".join(above_p95),
+                    "teachers_above_trajectory_p90": ",".join(above_p90),
+                    "teacher_count_above_p95": len(above_p95),
+                    "teacher_count_above_p90": len(above_p90),
+                    **{f"eu_{name}": float(eu[position, j]) for j, name in enumerate(names)},
+                    **{f"percentile_{name}": percentiles[j] for j, name in enumerate(names)},
+                }
+            )
         if index in selected:
             svg_name = f"trajectory-{index:06d}.svg"
             html_name = f"trajectory-{index:06d}.html"
@@ -457,6 +563,24 @@ def analyze_output(root: Path, tokenizer, plot_specs: list[str], top_n: int):
             )
             trajectory_stats = [row for row in stats_rows if row["trajectory_index"] == index]
             trajectory_high = [row for row in high_rows if row["trajectory_index"] == index]
+            trajectory_semantic = [row for row in semantic_rows if row["trajectory_index"] == index]
+            semantic_table_rows = "".join(
+                "<tr>"
+                + "".join(
+                    f"<td>{html.escape(str(row[key]))}</td>"
+                    for key in (
+                        "token_position",
+                        "decoded_token",
+                        "semantic_unit",
+                        "context",
+                        "teachers_above_trajectory_p95",
+                        "teachers_above_trajectory_p90",
+                    )
+                )
+                + "".join(f"<td>{_teacher_value_cell(row, name)}</td>" for name in names)
+                + "</tr>"
+                for row in trajectory_semantic
+            )
             table_rows = "".join(
                 "<tr>"
                 + "".join(
@@ -492,7 +616,14 @@ pre{{white-space:pre-wrap;background:#f6f8fa;padding:12px}}
 <h2>Teacher interval and mean</h2>
 <table><tr><th>Teacher</th><th>Min</th><th>Mean</th><th>Median</th>
 <th>p90</th><th>p95</th><th>Max</th></tr>{stats_table}</table>
-<h2>High-EU tokens</h2>
+<h2>Semantic high-EU tokens</h2>
+<p>Formatting-only Markdown/LaTeX pieces are excluded. A content token appears when any teacher is at or above
+its trajectory p95, or at least two teachers are at or above their own trajectory p90. Values are raw EU followed
+by the within-teacher trajectory percentile in parentheses.</p>
+<table><tr><th>Position</th><th>High-EU token</th><th>Semantic unit</th><th>Context</th><th>Teachers &ge; p95</th>
+<th>Teachers &ge; p90</th>{''.join(f'<th>{html.escape(name)} EU (percentile)</th>' for name in names)}</tr>
+{semantic_table_rows}</table>
+<h2>Raw top-{top_n} EU tokens</h2>
 <p>Rows are the union of each teacher's top {top_n} tokens; the p90 count is trajectory-relative.</p>
 <table><tr><th>Position</th><th>Token</th><th>Context</th><th>Selected by top-N</th>
 <th>Teachers ≥ p90</th>{''.join(f'<th>{html.escape(name)}</th>' for name in names)}</tr>{table_rows}</table>
@@ -511,6 +642,9 @@ pre{{white-space:pre-wrap;background:#f6f8fa;padding:12px}}
     high_fields = list(high_rows[0]) if high_rows else []
     if high_fields:
         write_csv(analysis / "high_eu_tokens.csv", high_rows, high_fields)
+    semantic_fields = list(semantic_rows[0]) if semantic_rows else []
+    if semantic_fields:
+        write_csv(analysis / "semantic_high_eu_tokens.csv", semantic_rows, semantic_fields)
     (analysis / "teacher_distribution.svg").write_text(
         distribution_svg(flattened, names), encoding="utf-8"
     )
@@ -538,7 +672,8 @@ This report covers the visible response text reconstructed losslessly with the o
 <table><tr><th>Teacher</th><th>Finite tokens</th><th>Min</th><th>Mean</th><th>Median</th>
 <th>p90</th><th>p95</th><th>Max</th></tr>{summary_table}</table>
 <h2>Selected trajectory reports</h2><ul>{links}</ul>
-<p>Machine-readable files: teacher_summary.json, per_trajectory_teacher_stats.csv/json, and high_eu_tokens.csv.</p>"""
+<p>Machine-readable files: teacher_summary.json, per_trajectory_teacher_stats.csv/json,
+semantic_high_eu_tokens.csv, and the legacy raw top-N high_eu_tokens.csv.</p>"""
     (analysis / "report.html").write_text(report, encoding="utf-8")
     write_json(
         analysis / "ANALYSIS_COMPLETED.json",
@@ -546,6 +681,8 @@ This report covers the visible response text reconstructed losslessly with the o
             "trajectories": len(records),
             "plotted_trajectories": sorted(selected),
             "high_token_top_n_per_teacher": top_n,
+            "semantic_high_eu_rule": "content token with any teacher >= trajectory p95 or at least two >= p90",
+            "semantic_high_eu_tokens": len(semantic_rows),
         },
     )
 

@@ -109,6 +109,7 @@ def test_analysis_exports_stats_high_tokens_and_self_contained_visuals(tmp_path)
         "per_trajectory_teacher_stats.json",
         "per_trajectory_teacher_stats.csv",
         "high_eu_tokens.csv",
+        "semantic_high_eu_tokens.csv",
         "teacher_distribution.svg",
         "report.html",
         "ANALYSIS_COMPLETED.json",
@@ -121,10 +122,39 @@ def test_analysis_exports_stats_high_tokens_and_self_contained_visuals(tmp_path)
     with (analysis / "high_eu_tokens.csv").open() as handle:
         high = list(csv.DictReader(handle))
     assert high and {row["trajectory_uid"] for row in high} == {record["uid"] for record in records}
+    with (analysis / "semantic_high_eu_tokens.csv").open() as handle:
+        semantic = list(csv.DictReader(handle))
+    assert semantic
+    assert all(row["decoded_token"].strip() not in {":", " "} for row in semantic)
+    assert all(
+        row["teachers_above_trajectory_p95"] or len(row["teachers_above_trajectory_p90"].split(",")) >= 2
+        for row in semantic
+    )
     report = (analysis / "report.html").read_text()
     assert "raw-logit scales are not calibrated" in report.lower()
     assert "trajectory-000000.html" in report
     assert not (analysis / "trajectories/trajectory-000001.html").exists()
+    trajectory_report = (analysis / "trajectories/trajectory-000000.html").read_text()
+    assert "Semantic high-EU tokens" in trajectory_report
+    assert "EU (percentile)" in trajectory_report
+
+
+def test_semantic_token_filter_drops_scaffolding_but_keeps_math_content():
+    for value in ("$", "$$", "{", "}", "}{", "\\", "frac", "boxed", "---", "Ġ$", "Ċ"):
+        assert not evaluator._is_semantic_token(value)
+    for value in (" Alicia", "ĠAlicia", "1", " x", "=", "+", " miles"):
+        assert evaluator._is_semantic_token(value)
+
+
+def test_semantic_unit_expands_wordpieces_and_math():
+    tokenizer = FakeTokenizer()
+    word_ids = list(b" completely done")
+    word_pieces = [bytes([value]).decode() for value in word_ids]
+    assert evaluator._semantic_unit(tokenizer, np.asarray(word_ids), word_pieces, 5) == "completely"
+    math_ids = list(b" value $\\frac{1}{4}$ now")
+    math_pieces = [bytes([value]).decode() for value in math_ids]
+    one = bytes(math_ids).index(b"1")
+    assert evaluator._semantic_unit(tokenizer, np.asarray(math_ids), math_pieces, one) == "$\\frac{1}{4}$"
 
 
 def test_extended_statistics_keeps_nonfinite_counts_and_quantiles():
