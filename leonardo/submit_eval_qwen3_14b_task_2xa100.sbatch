@@ -35,11 +35,21 @@ esac
 PROJECT_DIR=${PROJECT_DIR:-/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD}
 CONDA_BASE=${CONDA_BASE:-/leonardo/home/userexternal/jbi00000/miniconda3}
 OPD_CACHE_ROOT=${OPD_CACHE_ROOT:-/leonardo_work/EUHPC_D33_157/OPD-experiment/.cache/opd}
-EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$PROJECT_DIR/scripts/val/eval/justrl_eval_outputs/qwen3-14b-thinking-n16}
 CONDA_ENV=${CONDA_ENV:-$WORK/$USER/conda_envs/opd-cu118}
 MODEL_NAME=${MODEL_NAME:-Qwen3-14B}
 MODEL_PATH=${MODEL_PATH:-$PROJECT_DIR/model/$MODEL_NAME}
-ENABLE_THINKING=${ENABLE_THINKING:-1}
+ENABLE_THINKING=${ENABLE_THINKING:-0}
+case "$ENABLE_THINKING" in
+    1|true|True|TRUE) THINKING_LABEL=thinking ;;
+    0|false|False|FALSE) THINKING_LABEL=nonthinking ;;
+    *)
+        echo "ENABLE_THINKING must be one of: 1, true, 0, false; got: $ENABLE_THINKING" >&2
+        exit 2
+        ;;
+esac
+EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$PROJECT_DIR/scripts/val/eval/justrl_eval_outputs/qwen3-14b-$THINKING_LABEL-n16}
+TEMPERATURE=${TEMPERATURE:-0.7}
+TOP_P=${TOP_P:-0.8}
 
 source "$CONDA_BASE/etc/profile.d/conda.sh"
 conda activate "$CONDA_ENV"
@@ -71,12 +81,12 @@ nvidia-smi
 cd "$PROJECT_DIR/scripts/val/eval"
 TASK_LOWER=$(printf '%s' "$TASK" | tr '[:upper:]' '[:lower:]')
 MODEL_OUTPUT_DIR="$EVAL_OUTPUT_ROOT/$MODEL_NAME"
-FINAL_OUTPUT="$MODEL_OUTPUT_DIR/${TASK_LOWER}_t0.7_p0.95_n16-MNT31744.jsonl"
+FINAL_OUTPUT="$MODEL_OUTPUT_DIR/${TASK_LOWER}_t${TEMPERATURE}_p${TOP_P}_n16-MNT31744.jsonl"
 WORKER_ROOT="$EVAL_OUTPUT_ROOT/.workers/$TASK"
 WORKER_ZERO_ROOT="$WORKER_ROOT/gpu0"
 WORKER_ONE_ROOT="$WORKER_ROOT/gpu1"
-WORKER_ZERO_OUTPUT="$WORKER_ZERO_ROOT/$MODEL_NAME/${TASK_LOWER}_t0.7_p0.95_n8-MNT31744.jsonl"
-WORKER_ONE_OUTPUT="$WORKER_ONE_ROOT/$MODEL_NAME/${TASK_LOWER}_t0.7_p0.95_n8-MNT31744.jsonl"
+WORKER_ZERO_OUTPUT="$WORKER_ZERO_ROOT/$MODEL_NAME/${TASK_LOWER}_t${TEMPERATURE}_p${TOP_P}_n8-MNT31744.jsonl"
+WORKER_ONE_OUTPUT="$WORKER_ONE_ROOT/$MODEL_NAME/${TASK_LOWER}_t${TEMPERATURE}_p${TOP_P}_n8-MNT31744.jsonl"
 WORKER_ZERO_CACHE_ROOT="$VLLM_CACHE_ROOT/gpu0"
 WORKER_ONE_CACHE_ROOT="$VLLM_CACHE_ROOT/gpu1"
 
@@ -89,18 +99,13 @@ else
         --serial
         --tasks "$TASK"
         --num-samples 8
+        --temperature "$TEMPERATURE"
+        --top-p "$TOP_P"
         --model "$MODEL_NAME=$MODEL_PATH"
     )
-    # Shell environment variables are strings. Accept common true/false
-    # spellings instead of silently treating ENABLE_THINKING=true as false.
-    case "$ENABLE_THINKING" in
-        1|true|True|TRUE) WORKER_ARGS+=(--enable-thinking) ;;
-        0|false|False|FALSE) ;;
-        *)
-            echo "ENABLE_THINKING must be one of: 1, true, 0, false; got: $ENABLE_THINKING" >&2
-            exit 2
-            ;;
-    esac
+    if [[ "$THINKING_LABEL" == thinking ]]; then
+        WORKER_ARGS+=(--enable-thinking)
+    fi
     if [[ "${EVAL_OVERWRITE:-0}" == "1" ]]; then
         WORKER_ARGS+=(--overwrite)
     fi

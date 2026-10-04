@@ -22,8 +22,18 @@ CONDA_BASE=${CONDA_BASE:-/leonardo/home/userexternal/jbi00000/miniconda3}
 OPD_CACHE_ROOT=${OPD_CACHE_ROOT:-/leonardo_work/EUHPC_D33_157/OPD-experiment/.cache/opd}
 MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B-opd-4B}
 MODEL_PATH=${MODEL_PATH:-$PROJECT_DIR/model/$MODEL_NAME}
-EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$PROJECT_DIR/scripts/val/eval/justrl_eval_outputs/$MODEL_NAME-thinking-n16}
-ENABLE_THINKING=${ENABLE_THINKING:-1}
+ENABLE_THINKING=${ENABLE_THINKING:-0}
+case "$ENABLE_THINKING" in
+    1|true|True|TRUE) THINKING_LABEL=thinking ;;
+    0|false|False|FALSE) THINKING_LABEL=nonthinking ;;
+    *)
+        echo "ENABLE_THINKING must be one of: 1, true, 0, false; got: $ENABLE_THINKING" >&2
+        exit 2
+        ;;
+esac
+EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$PROJECT_DIR/scripts/val/eval/justrl_eval_outputs/$MODEL_NAME-$THINKING_LABEL-n16}
+TEMPERATURE=${TEMPERATURE:-0.7}
+TOP_P=${TOP_P:-0.8}
 CONDA_ENV=${CONDA_ENV:-$WORK/$USER/conda_envs/opd-cu118}
 
 source "$CONDA_BASE/etc/profile.d/conda.sh"
@@ -54,18 +64,13 @@ GENERATOR_ARGS=(
     --output-root "$EVAL_OUTPUT_ROOT"
     --gpu-ids 0
     --serial
+    --temperature "$TEMPERATURE"
+    --top-p "$TOP_P"
     --model "$MODEL_NAME=$MODEL_PATH"
 )
-# Shell environment variables are strings. Accept common true/false spellings
-# explicitly instead of silently treating ENABLE_THINKING=true as false.
-case "$ENABLE_THINKING" in
-    1|true|True|TRUE) GENERATOR_ARGS+=(--enable-thinking) ;;
-    0|false|False|FALSE) ;;
-    *)
-        echo "ENABLE_THINKING must be one of: 1, true, 0, false; got: $ENABLE_THINKING" >&2
-        exit 2
-        ;;
-esac
+if [[ "$THINKING_LABEL" == thinking ]]; then
+    GENERATOR_ARGS+=(--enable-thinking)
+fi
 if [[ "${EVAL_OVERWRITE:-0}" == "1" ]]; then
     GENERATOR_ARGS+=(--overwrite)
 fi

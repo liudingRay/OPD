@@ -22,7 +22,6 @@ MODEL_ROOT=${MODEL_ROOT:-$OPD_BASE/models}
 OPD_CACHE_ROOT=${OPD_CACHE_ROOT:-$OPD_BASE/cache/opd}
 EXPERIMENT_ROOT=${EXPERIMENT_ROOT:-$OPD_BASE/experiments/OPD}
 DATA_DIR=${DATA_DIR:-$PROJECT_DIR/scripts/val/data}
-OVERLAP_OUTPUT_ROOT=${OVERLAP_OUTPUT_ROOT:-$EXPERIMENT_ROOT/evaluation/curriculum-overlap-fixed}
 STAGE1_MODEL_PATH=${STAGE1_MODEL_PATH:-$MODEL_ROOT/Qwen3-1.7B-OPD-4B}
 STAGE2_MODEL_PATH=${STAGE2_MODEL_PATH:-$MODEL_ROOT/Qwen3-1.7B-OPD-4B-8B}
 STAGE3_MODEL_PATH=${STAGE3_MODEL_PATH:-$MODEL_ROOT/Qwen3-1.7B-OPD-4B-8B-14B}
@@ -34,10 +33,20 @@ SAMPLES_PER_QUESTION=${SAMPLES_PER_QUESTION:-1}
 SEED=${SEED:-42}
 # Match current puhui/eval-qwen3-1p7b-opd generation settings, not training length.
 MAX_TOKENS=${MAX_TOKENS:-38912}
-TEMPERATURE=${TEMPERATURE:-0.6}
-TOP_P=${TOP_P:-0.95}
+TEMPERATURE=${TEMPERATURE:-0.7}
+TOP_P=${TOP_P:-0.8}
 GENERATION_TOP_K=${GENERATION_TOP_K:-20}
 SCORE_CHUNK_SIZE=${SCORE_CHUNK_SIZE:-128}
+ENABLE_THINKING=${ENABLE_THINKING:-0}
+case "$ENABLE_THINKING" in
+    1|true|True|TRUE) THINKING_LABEL=thinking ;;
+    0|false|False|FALSE) THINKING_LABEL=nonthinking ;;
+    *)
+        echo "ENABLE_THINKING must be one of: 1, true, 0, false; got: $ENABLE_THINKING" >&2
+        exit 2
+        ;;
+esac
+OVERLAP_OUTPUT_ROOT=${OVERLAP_OUTPUT_ROOT:-$EXPERIMENT_ROOT/evaluation/curriculum-overlap-fixed-$THINKING_LABEL}
 
 if [[ ! -f "$OPD_ENV/bin/activate" ]]; then
     echo "Missing OPD environment: $OPD_ENV/bin/activate" >&2
@@ -70,6 +79,9 @@ ARGS=(
     --generation-top-k "$GENERATION_TOP_K" --ks 4 8 16
     --score-chunk-size "$SCORE_CHUNK_SIZE"
 )
+if [[ "$THINKING_LABEL" == thinking ]]; then
+    ARGS+=(--enable-thinking)
+fi
 if [[ ${DRY_RUN:-0} == 1 ]]; then
     exec python "$PROJECT_DIR/scripts/val/eval/eval_fixed_overlap.py" "${ARGS[@]}" --dry-run
 fi

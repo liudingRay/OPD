@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Evaluate one merged Qwen3-1.7B OPD model on AIME24, AIME25, and AMC23
-# with thinking enabled and avg@16 on the shared puhui H800 server.
+# in non-thinking mode by default with avg@16 on the shared puhui H800 server.
 #
 # Usage (choose one currently idle physical GPU explicitly):
 #   CUDA_VISIBLE_DEVICES=6 bash puhui/eval-qwen3-1p7b-opd
@@ -17,11 +17,19 @@ EXPERIMENT_ROOT=${EXPERIMENT_ROOT:-$OPD_BASE/experiments/OPD}
 
 MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B-OPD-4B}
 MODEL_PATH=${MODEL_PATH:-$OPD_BASE/models/$MODEL_NAME}
-EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$EXPERIMENT_ROOT/evaluation/$MODEL_NAME-thinking-n16}
-ENABLE_THINKING=${ENABLE_THINKING:-1}
+ENABLE_THINKING=${ENABLE_THINKING:-0}
+case "$ENABLE_THINKING" in
+    1|true|True|TRUE) THINKING_LABEL=thinking ;;
+    0|false|False|FALSE) THINKING_LABEL=nonthinking ;;
+    *)
+        echo "ENABLE_THINKING must be one of: 1, true, 0, false; got: $ENABLE_THINKING" >&2
+        exit 2
+        ;;
+esac
+EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$EXPERIMENT_ROOT/evaluation/$MODEL_NAME-$THINKING_LABEL-n16}
 EVAL_GPU_ID=${EVAL_GPU_ID:-${CUDA_VISIBLE_DEVICES:-}}
-TEMPERATURE=${TEMPERATURE:-0.6}
-TOP_P=${TOP_P:-0.95}
+TEMPERATURE=${TEMPERATURE:-0.7}
+TOP_P=${TOP_P:-0.8}
 TOP_K=${TOP_K:-20}
 MIN_P=${MIN_P:-0.0}
 MAX_TOKENS=${MAX_TOKENS:-38912}
@@ -144,14 +152,9 @@ GENERATOR_ARGS=(
     --min-p "$MIN_P"
     --max-tokens "$MAX_TOKENS"
 )
-case "$ENABLE_THINKING" in
-    1|true|True|TRUE) GENERATOR_ARGS+=(--enable-thinking) ;;
-    0|false|False|FALSE) ;;
-    *)
-        echo "ENABLE_THINKING must be one of: 1, true, 0, false; got: $ENABLE_THINKING" >&2
-        exit 2
-        ;;
-esac
+if [[ "$THINKING_LABEL" == thinking ]]; then
+    GENERATOR_ARGS+=(--enable-thinking)
+fi
 if [[ ${EVAL_OVERWRITE:-0} == 1 ]]; then
     GENERATOR_ARGS+=(--overwrite)
 fi

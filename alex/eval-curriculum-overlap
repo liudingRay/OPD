@@ -41,6 +41,15 @@ OPD_CACHE_ROOT=${OPD_CACHE_ROOT:-$OPD_WS/.cache/opd}
 DATA_DIR=${DATA_DIR:-$PROJECT_DIR/scripts/val/data}
 LOG_DIR=${LOG_DIR:-$EXPERIMENT_ROOT/logs}
 PAIR_SET=${PAIR_SET:-all}
+ENABLE_THINKING=${ENABLE_THINKING:-0}
+case "$ENABLE_THINKING" in
+    1|true|True|TRUE) THINKING_LABEL=thinking ;;
+    0|false|False|FALSE) THINKING_LABEL=nonthinking ;;
+    *)
+        echo "ENABLE_THINKING must be one of: 1, true, 0, false; got: $ENABLE_THINKING" >&2
+        exit 2
+        ;;
+esac
 
 # Export at submission so the allocation uses the same selected model paths.
 STAGE1_MODEL_PATH=${STAGE1_MODEL_PATH:-$MODEL_ROOT/Qwen3-1.7B-OPD-4B}
@@ -133,14 +142,15 @@ case "$PAIR_SET" in
         exit 2
         ;;
 esac
+DEFAULT_OUTPUT_NAME+=-$THINKING_LABEL
 OVERLAP_OUTPUT_ROOT=${OVERLAP_OUTPUT_ROOT:-$EXPERIMENT_ROOT/evaluation/$DEFAULT_OUTPUT_NAME}
 
 QUESTIONS_PER_TASK=${QUESTIONS_PER_TASK:-5}
 SAMPLES_PER_QUESTION=${SAMPLES_PER_QUESTION:-1}
 SEED=${SEED:-42}
 MAX_TOKENS=${MAX_TOKENS:-38912}
-TEMPERATURE=${TEMPERATURE:-0.6}
-TOP_P=${TOP_P:-0.95}
+TEMPERATURE=${TEMPERATURE:-0.7}
+TOP_P=${TOP_P:-0.8}
 GENERATION_TOP_K=${GENERATION_TOP_K:-20}
 SCORE_CHUNK_SIZE=${SCORE_CHUNK_SIZE:-128}
 
@@ -173,6 +183,9 @@ ARGS=(
     --generation-top-k "$GENERATION_TOP_K" --ks 4 8 16
     --score-chunk-size "$SCORE_CHUNK_SIZE"
 )
+if [[ "$THINKING_LABEL" == thinking ]]; then
+    ARGS+=(--enable-thinking)
+fi
 
 module purge
 module load cuda/12.8.1
@@ -215,6 +228,7 @@ if [[ -z ${SLURM_JOB_ID:-} || ${DRY_RUN:-0} == 1 ]]; then
     export MULTITEACHER_STUDENT_PATH MULTITEACHER_STUDENT_LABEL
     export TEACHER4B_PATH TEACHER8B_PATH TEACHER14B_PATH
     export QUESTIONS_PER_TASK SAMPLES_PER_QUESTION SEED MAX_TOKENS TEMPERATURE TOP_P GENERATION_TOP_K
+    export ENABLE_THINKING
     export SCORE_CHUNK_SIZE
     JOB_NAME=${JOB_NAME:-eval-overlap-${PAIR_SET}-q${QUESTIONS_PER_TASK}-r${SAMPLES_PER_QUESTION}}
     exec sbatch --export=ALL --job-name="$JOB_NAME" \

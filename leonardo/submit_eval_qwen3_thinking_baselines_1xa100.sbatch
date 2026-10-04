@@ -1,12 +1,12 @@
 #!/bin/bash
-# Evaluate the official Qwen3-1.7B, 4B, and 8B thinking baselines serially:
-# one vLLM process at a time on one A100 GPU.
+# Evaluate the official Qwen3-1.7B, 4B, and 8B baselines serially in
+# non-thinking mode by default. The historical filename is retained.
 # Submit from the inner OPD checkout with:
 #   sbatch leonardo/submit_eval_qwen3_thinking_baselines_1xa100.sbatch
 # Override the result location or rerun existing outputs, for example:
 #   EVAL_OUTPUT_ROOT=/path/to/results EVAL_OVERWRITE=1 \
 #     sbatch leonardo/submit_eval_qwen3_thinking_baselines_1xa100.sbatch
-#SBATCH --job-name=eval-qwen3-thinking
+#SBATCH --job-name=eval-qwen3-baselines
 #SBATCH --account=EUHPC_D33_157
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
@@ -23,7 +23,18 @@ set -eo pipefail
 PROJECT_DIR=${PROJECT_DIR:-/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD}
 CONDA_BASE=${CONDA_BASE:-/leonardo/home/userexternal/jbi00000/miniconda3}
 OPD_CACHE_ROOT=${OPD_CACHE_ROOT:-/leonardo_work/EUHPC_D33_157/OPD-experiment/.cache/opd}
-EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$PROJECT_DIR/scripts/val/eval/justrl_eval_outputs/qwen3-thinking-1p7b-4b-8b-n16}
+ENABLE_THINKING=${ENABLE_THINKING:-0}
+case "$ENABLE_THINKING" in
+    1|true|True|TRUE) THINKING_LABEL=thinking ;;
+    0|false|False|FALSE) THINKING_LABEL=nonthinking ;;
+    *)
+        echo "ENABLE_THINKING must be one of: 1, true, 0, false; got: $ENABLE_THINKING" >&2
+        exit 2
+        ;;
+esac
+EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$PROJECT_DIR/scripts/val/eval/justrl_eval_outputs/qwen3-$THINKING_LABEL-1p7b-4b-8b-n16}
+TEMPERATURE=${TEMPERATURE:-0.7}
+TOP_P=${TOP_P:-0.8}
 CONDA_ENV=${CONDA_ENV:-$WORK/$USER/conda_envs/opd-cu118}
 
 source "$CONDA_BASE/etc/profile.d/conda.sh"
@@ -55,11 +66,15 @@ GENERATOR_ARGS=(
     --output-root "$EVAL_OUTPUT_ROOT"
     --gpu-ids 0
     --serial
-    --enable-thinking
+    --temperature "$TEMPERATURE"
+    --top-p "$TOP_P"
     --model "Qwen3-1.7B=$PROJECT_DIR/model/Qwen3-1.7B"
     --model "Qwen3-4B=$PROJECT_DIR/model/Qwen3-4B"
     --model "Qwen3-8B=$PROJECT_DIR/model/Qwen3-8B"
 )
+if [[ "$THINKING_LABEL" == thinking ]]; then
+    GENERATOR_ARGS+=(--enable-thinking)
+fi
 if [[ "${EVAL_OVERWRITE:-0}" == "1" ]]; then
     GENERATOR_ARGS+=(--overwrite)
 fi

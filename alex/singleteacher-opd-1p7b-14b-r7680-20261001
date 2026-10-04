@@ -8,7 +8,13 @@ export ACTOR_MODEL_NAME=Qwen3-1.7B
 export REWARD_MODEL_NAME=Qwen3-14B
 export ACTOR_MODEL_PATH="$OPD_WS/models/Qwen3-1.7B"
 export REWARD_MODEL_PATH="$OPD_WS/models/Qwen3-14B"
-export EXPERIMENT_NAME=singleteacher-opd-Qwen3-1.7B-Qwen3-14B-r7680-n2-seed42-2ep-20261001
+export ENABLE_THINKING=${ENABLE_THINKING:-0}
+case "$ENABLE_THINKING" in
+    1|true|True|TRUE) THINKING_LABEL=thinking ;;
+    0|false|False|FALSE) THINKING_LABEL=nonthinking ;;
+    *) echo "ENABLE_THINKING must be one of: 1, true, 0, false; got: $ENABLE_THINKING" >&2; exit 2 ;;
+esac
+export EXPERIMENT_NAME=${EXPERIMENT_NAME:-singleteacher-opd-Qwen3-1.7B-Qwen3-14B-r7680-T1.0-n2-genk20-topp1.0-opdk16-only_stu-${THINKING_LABEL}-seed42-2ep-20261001}
 export EXPERIMENT_SUFFIX=-singleteacher-14b-r7680-20261001
 export MAX_RESP_LENGTH=7680
 export MAX_VAL_RESP_LENGTH=7680

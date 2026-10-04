@@ -208,7 +208,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tasks", nargs="+", choices=DEFAULT_TASKS, default=list(DEFAULT_TASKS))
     parser.add_argument("--num-samples", type=int, default=16)
     parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--top-p", type=float, default=0.8)
     parser.add_argument("--top-k", type=int, default=-1)
     parser.add_argument("--min-p", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, default=31744)

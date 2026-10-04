@@ -214,7 +214,7 @@ def preflight(config):
             for sample in config["samples"]:
                 prompt_ids = tokenizer.apply_chat_template(
                     [{"role": "user", "content": PROMPT_TEMPLATE.format(problem=sample["question"])}],
-                    tokenize=True, add_generation_prompt=True, enable_thinking=True,
+                    tokenize=True, add_generation_prompt=True, enable_thinking=config["thinking"],
                 )
                 prompt_lengths.append(len(prompt_ids))
                 if len(prompt_ids) + config["max_tokens"] > model_config.max_position_embeddings:
@@ -244,7 +244,7 @@ def generate(config, pair, directory):
     for index, sample in enumerate(response_samples):
         prompt_ids = tokenizer.apply_chat_template(
             [{"role": "user", "content": PROMPT_TEMPLATE.format(problem=sample["question"])}],
-            tokenize=True, add_generation_prompt=True, enable_thinking=True,
+            tokenize=True, add_generation_prompt=True, enable_thinking=config["thinking"],
         )
         params = SamplingParams(n=1, seed=sample["seed"],
                                 temperature=config["temperature"], top_p=config["top_p"],
@@ -812,6 +812,7 @@ def main():
     parser.add_argument("--generation-top-k", type=int, required=True)
     parser.add_argument("--ks", type=int, nargs="+", required=True)
     parser.add_argument("--score-chunk-size", type=int, default=128)
+    parser.add_argument("--enable-thinking", action="store_true", help="Disabled by default.")
     parser.add_argument("--dry-run", action="store_true", help="Validate inputs and selection without loading weights")
     args = parser.parse_args()
     if len({p["label"] for p in args.pair}) != len(args.pair):
@@ -835,7 +836,7 @@ def main():
               "samples_per_question": args.samples_per_question,
               "max_tokens": args.max_tokens, "temperature": args.temperature, "top_p": args.top_p,
               "generation_top_k": args.generation_top_k, "ks": sorted(set(args.ks)),
-              "score_chunk_size": args.score_chunk_size, "thinking": True,
+              "score_chunk_size": args.score_chunk_size, "thinking": args.enable_thinking,
               "scoring_temperature": 1.0, "source_sha256": file_hash(__file__)}
     config["versions"] = {name: importlib.metadata.version(name)
                           for name in ("torch", "transformers", "vllm", "numpy", "pandas", "pyarrow")}

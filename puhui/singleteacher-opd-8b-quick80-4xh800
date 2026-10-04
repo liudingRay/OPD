@@ -22,7 +22,13 @@ export TRAINER_PROTECTED_CHECKPOINT_STEPS='[200,400,600]'
 export TRAINER_RESUME_MODE=auto
 export WANDB_MODE=offline
 
-export EXPERIMENT_NAME=${EXPERIMENT_NAME:-token_reward_direct_DAPO-Math-17k_singleteacher-independent_Qwen3-1.7B_Qwen3-8B_r7680-T0.6-n2-genk20-topp0.95-opdk16-only_stu-quick80-seed42-4xh800}
+export ENABLE_THINKING=${ENABLE_THINKING:-0}
+case "$ENABLE_THINKING" in
+    1|true|True|TRUE) THINKING_LABEL=thinking ;;
+    0|false|False|FALSE) THINKING_LABEL=nonthinking ;;
+    *) echo "ENABLE_THINKING must be one of: 1, true, 0, false; got: $ENABLE_THINKING" >&2; exit 2 ;;
+esac
+export EXPERIMENT_NAME=${EXPERIMENT_NAME:-token_reward_direct_DAPO-Math-17k_singleteacher-independent_Qwen3-1.7B_Qwen3-8B_r7680-T1.0-n2-genk20-topp1.0-opdk16-only_stu-${THINKING_LABEL}-quick80-seed42-4xh800}
 export RAY_TEMP_DIR=${RAY_TEMP_DIR:-$OPD_BASE/r/s8b}
 export TMPDIR=${TMPDIR:-$OPD_BASE/t/singleteacher-8b-r7680}
 

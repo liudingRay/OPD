@@ -141,10 +141,26 @@ TRAIN_MAX_SAMPLES=${TRAIN_MAX_SAMPLES:--1}
 DATA_SHUFFLE=${DATA_SHUFFLE:-True}
 DATA_SEED=${DATA_SEED:-42}
 TRAINER_TOTAL_TRAINING_STEPS=${TRAINER_TOTAL_TRAINING_STEPS:-null}
+ENABLE_THINKING=${ENABLE_THINKING:-0}
 SBATCH_TIME=24:00:00
 SBATCH_GPUS=4
 SBATCH_CPUS=32
 EXPERIMENT_SUFFIX=${EXPERIMENT_SUFFIX:-}
+
+case "$ENABLE_THINKING" in
+    1|true|True|TRUE)
+        ENABLE_THINKING_BOOL=True
+        THINKING_LABEL=thinking
+        ;;
+    0|false|False|FALSE)
+        ENABLE_THINKING_BOOL=False
+        THINKING_LABEL=nonthinking
+        ;;
+    *)
+        echo "ENABLE_THINKING must be one of: 1, true, 0, false; got: $ENABLE_THINKING" >&2
+        exit 2
+        ;;
+esac
 
 if [[ "$SMOKE" == 1 ]]; then
     # Exercise a bounded number of complete rollout/reward/backward/optimizer
@@ -160,9 +176,12 @@ if [[ "$SMOKE" == 1 ]]; then
 fi
 TRAINER_N_GPUS_PER_NODE=$SBATCH_GPUS
 
-TEMPERATURE=${TEMPERATURE:-0.6}
-TOP_P=${TOP_P:-0.95}
+TEMPERATURE=${TEMPERATURE:-1.0}
+TOP_P=${TOP_P:-1.0}
 GENERATION_TOP_K=${GENERATION_TOP_K:-20}
+VAL_TEMPERATURE=${VAL_TEMPERATURE:-0.7}
+VAL_TOP_P=${VAL_TOP_P:-0.8}
+VAL_TOP_K=${VAL_TOP_K:-$GENERATION_TOP_K}
 TEACHER_TEMPERATURE=${TEACHER_TEMPERATURE:-1.0}
 REPETITION_PENALTY=${REPETITION_PENALTY:-1.0}
 LOG_PROB_TOP_K=${LOG_PROB_TOP_K:-16}
@@ -192,7 +211,7 @@ fi
 DEFAULT_EXPERIMENT_NAME=token_reward_direct_${TRAIN_DATASET_NAME}_${EXPERIMENT_FAMILY}
 DEFAULT_EXPERIMENT_NAME+=_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_r${MAX_RESP_LENGTH}
 DEFAULT_EXPERIMENT_NAME+=-T${TEMPERATURE}-n${N_RESPONSES}-genk${GENERATION_TOP_K}-topp${TOP_P}
-DEFAULT_EXPERIMENT_NAME+=-opdk${LOG_PROB_TOP_K}-${TOP_K_STRATEGY}${EXPERIMENT_SUFFIX}
+DEFAULT_EXPERIMENT_NAME+=-opdk${LOG_PROB_TOP_K}-${TOP_K_STRATEGY}-${THINKING_LABEL}${EXPERIMENT_SUFFIX}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-$DEFAULT_EXPERIMENT_NAME}
 CKPT_PATH=$EXPERIMENT_ROOT/checkpoints/$EXPERIMENT_NAME
 VALIDATION_DIR=$EXPERIMENT_ROOT/validation/$EXPERIMENT_NAME
@@ -269,9 +288,10 @@ print_configuration() {
     echo "  resources:     1 node, $SBATCH_GPUS x A100-80GB, $SBATCH_CPUS CPUs, time=$SBATCH_TIME"
     echo "  teacher mix:   $TEACHER_WEIGHT_MODE, trajectory EMA beta=$TEACHER_EMA_BETA, tau=$TEACHER_SELECTION_TAU"
     echo "  resume mode:   $TRAINER_RESUME_MODE"
-    echo "  thinking:      enabled"
+    echo "  thinking:      $THINKING_LABEL"
     echo "  lengths:       prompt=$MAX_PROMPT_LENGTH, train_response=$MAX_RESP_LENGTH, val_response=$MAX_VAL_RESP_LENGTH"
-    echo "  sampling:      temperature=$TEMPERATURE, top_p=$TOP_P, top_k=$GENERATION_TOP_K"
+    echo "  train sampling:temperature=$TEMPERATURE, top_p=$TOP_P, top_k=$GENERATION_TOP_K"
+    echo "  val sampling:  temperature=$VAL_TEMPERATURE, top_p=$VAL_TOP_P, top_k=$VAL_TOP_K"
     echo "  OPD support:   student top-$LOG_PROB_TOP_K ($TOP_K_STRATEGY), n=$N_RESPONSES"
     echo "  token budget:  max_model_len=$MAX_MODEL_LEN, PPO per GPU=$PPO_MAX_TOKEN_LEN_PER_GPU"
     echo "  vLLM graphs:   enforce_eager=$ROLLOUT_ENFORCE_EAGER, capture_sizes=$CUDAGRAPH_CAPTURE_SIZES"
@@ -497,7 +517,7 @@ python -m verl.trainer.main_ppo \
     "data.filter_overlong_prompts=True" \
     "data.truncation=error" \
     "data.return_raw_chat=True" \
-    "+data.apply_chat_template_kwargs.enable_thinking=True" \
+    "+data.apply_chat_template_kwargs.enable_thinking=$ENABLE_THINKING_BOOL" \
     "actor_rollout_ref.model.path=$ACTOR_MODEL_PATH" \
     "actor_rollout_ref.model.use_remove_padding=True" \
     "actor_rollout_ref.model.enable_activation_offload=True" \
@@ -539,8 +559,9 @@ python -m verl.trainer.main_ppo \
     "actor_rollout_ref.rollout.val_kwargs.do_sample=True" \
     "+actor_rollout_ref.rollout.val_kwargs.max_tokens=$MAX_VAL_RESP_LENGTH" \
     "actor_rollout_ref.rollout.val_kwargs.n=16" \
-    "actor_rollout_ref.rollout.val_kwargs.temperature=0.7" \
-    "actor_rollout_ref.rollout.val_kwargs.top_p=0.95" \
+    "actor_rollout_ref.rollout.val_kwargs.temperature=$VAL_TEMPERATURE" \
+    "actor_rollout_ref.rollout.val_kwargs.top_p=$VAL_TOP_P" \
+    "actor_rollout_ref.rollout.val_kwargs.top_k=$VAL_TOP_K" \
     "actor_rollout_ref.rollout.repetition_penalty=$REPETITION_PENALTY" \
     "actor_rollout_ref.rollout.calculate_log_probs=True" \
     "actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1" \

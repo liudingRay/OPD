@@ -11,7 +11,7 @@ This directory contains the current CINECA Leonardo launchers and older top-leve
 | `leonardo/opd_pilot_4xa100.sh` | Older single-node, four-A100 OPD pilot settings. |
 | `leonardo/on_policy_distillation.sh` | Legacy general OPD wrapper used by the old `opd_pilot_*` scripts. It converts environment variables into `verl.trainer.main_ppo` Hydra overrides, enables the teacher reward model and token-level OPD estimator, manages an optional local Ray head, and retains obsolete `account=test` / `partition=TEST1` defaults. Current Curriculum OPD launchers do not call it. |
 | `leonardo/grpo.sh` | Legacy monolithic GRPO reference. It uses `ADV_ESTIMATOR=grpo`, disables the reward model and thinking mode, assumes eight GPUs, starts its own Ray head, logs to SwanLab, and retains obsolete `account=test` / `partition=TEST1` directives. It is not the current Leonardo GRPO launcher and must not be submitted unchanged. |
-| `leonardo/submit_eval_qwen3_thinking_baselines_1xa100.sbatch` | Serial thinking-mode `avg@16` evaluation of official Qwen3-1.7B/4B/8B on Leonardo. |
+| `leonardo/submit_eval_qwen3_thinking_baselines_1xa100.sbatch` | Serial `avg@16` evaluation of official Qwen3-1.7B/4B/8B on Leonardo. The historical filename remains, but non-thinking is now the default. |
 | `leonardo/submit_eval_qwen3_model_1xa100.sbatch` | Evaluate one local Qwen3 model on Leonardo, selected with `MODEL_NAME` and `MODEL_PATH`. |
 | `leonardo/submit_eval_qwen3_14b_task_2xa100.sbatch` | Evaluate one 14B benchmark per Leonardo job; two GPUs generate eight samples each and merge to 16. |
 | `leonardo/submit_eval_qwen3_1p7b_opd_1xa100.sbatch` | Evaluate a merged 1.7B OPD checkpoint on Leonardo. |
