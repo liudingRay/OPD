@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compute three-teacher token EU on text-only student evaluation rollouts.
+"""Compute student or three-teacher token EU on text-only student evaluation rollouts.
 
 The standard baseline evaluator saves prompt/response text but not vLLM token
 IDs. This wrapper reconstructs the visible token sequence with the evaluated
@@ -107,10 +107,25 @@ def _decode(tokenizer, token_ids: list[int]) -> str:
     )
 
 
-def build_trajectories(rows, tokenizer, config, task: str, max_trajectories: int = 0):
+def build_trajectories(
+    rows,
+    tokenizer,
+    config,
+    task: str,
+    max_trajectories: int = 0,
+    example_ids: list[int] | None = None,
+    grade_fn=None,
+):
     if max_trajectories < 0:
         raise ValueError("max_trajectories must be nonnegative")
-    selected = rows[:max_trajectories] if max_trajectories else rows
+    requested_ids = set(example_ids or [])
+    available_ids = {row.get("example_id") for row in rows}
+    missing_ids = requested_ids - available_ids
+    if missing_ids:
+        raise ValueError(f"Requested example IDs are absent from the rollout file: {sorted(missing_ids)}")
+    selected = [row for row in rows if not requested_ids or row.get("example_id") in requested_ids]
+    if max_trajectories:
+        selected = selected[:max_trajectories]
     thinking = bool(config.get("enable_thinking", False))
     records, seen = [], set()
     for source_index, row in enumerate(selected):
@@ -160,6 +175,9 @@ def build_trajectories(rows, tokenizer, config, task: str, max_trajectories: int
                 "answer": row["answer"],
                 "seed": row["seed"],
                 "response": row["response"],
+                "rule_correct": (
+                    bool(grade_fn(row["response"], row["answer"])) if grade_fn is not None else None
+                ),
                 "finish_reason": "not_recorded_by_eval_baselines",
                 "prompt_token_ids": list(prompt_ids),
                 "response_token_ids": list(response_ids),
@@ -380,7 +398,7 @@ def distribution_svg(values_by_teacher, names):
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
         '<rect width="100%" height="100%" fill="white"/>',
         f'<text x="{left}" y="22" font-family="sans-serif" font-size="16">'
-        "Teacher EU distribution (1st–99th percentile display range)</text>",
+        "Scoring-model EU distribution (1st–99th percentile display range)</text>",
     ]
     histograms = []
     peak = 1.0
@@ -432,7 +450,7 @@ def trajectory_svg(eu, valid, names, highlighted):
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
         '<rect width="100%" height="100%" fill="white"/>',
         f'<text x="{left}" y="24" font-family="sans-serif" font-size="16">'
-        f"Per-token teacher EU (display clipped to p01–p99: {low:.6g}–{high:.6g})</text>",
+        f"Per-token EU (display clipped to p01–p99: {low:.6g}–{high:.6g})</text>",
     ]
     for teacher_index, name in enumerate(names):
         points = []
@@ -503,8 +521,10 @@ def analyze_output(root: Path, tokenizer, plot_specs: list[str], top_n: int):
     config = read_json(root / "config.json")
     records = read_json(root / "trajectories.json")
     names = [teacher["name"] for teacher in config["teachers"]]
-    if len(names) != 3:
-        raise ValueError("Visualization expects exactly three teachers")
+    if len(names) not in (1, 3):
+        raise ValueError("Visualization expects one student or exactly three teachers")
+    is_student_mode = config.get("scoring_mode") == "student" or names == ["Student"]
+    scorer_label = "Student" if is_student_mode else "Teacher"
     selected = _select_plot_indices(records, plot_specs)
     analysis = root / "analysis"
     trajectory_reports = analysis / "trajectories"
@@ -623,6 +643,10 @@ def analyze_output(root: Path, tokenizer, plot_specs: list[str], top_n: int):
         trajectory_semantic_spans = _merge_semantic_rows(trajectory_semantic_tokens, names)
         semantic_span_rows.extend(trajectory_semantic_spans)
         if index in selected:
+            rule_correct = record.get("rule_correct")
+            grade_text = (
+                "CORRECT" if rule_correct is True else "INCORRECT" if rule_correct is False else "NOT_GRADED"
+            )
             svg_name = f"trajectory-{index:06d}.svg"
             html_name = f"trajectory-{index:06d}.html"
             (trajectory_reports / svg_name).write_text(
@@ -677,26 +701,28 @@ table{{border-collapse:collapse;width:100%}}
 td,th{{border:1px solid #ddd;padding:5px}}
 pre{{white-space:pre-wrap;background:#f6f8fa;padding:12px}}
 </style>
-<h1>{html.escape(record['uid'])}</h1><p><b>Question:</b> {html.escape(record['question'])}</p>
+<h1>{html.escape(record['uid'])}</h1>
+<p><b>Rule grade:</b> {grade_text}</p>
+<p><b>Question:</b> {html.escape(record['question'])}</p>
 <img src="{svg_name}" alt="Per-token EU plot" style="max-width:100%">
-<h2>Teacher interval and mean</h2>
-<table><tr><th>Teacher</th><th>Min</th><th>Mean</th><th>Median</th>
+<h2>{scorer_label} interval and mean</h2>
+<table><tr><th>{scorer_label}</th><th>Min</th><th>Mean</th><th>Median</th>
 <th>p90</th><th>p95</th><th>Max</th></tr>{stats_table}</table>
 <h2>Semantic high-EU tokens</h2>
-<p>Formatting-only Markdown/LaTeX pieces are excluded. A content token appears when any teacher is at or above
-its trajectory p95, or at least two teachers are at or above their own trajectory p90. Values are raw EU followed
-by the within-teacher trajectory percentile in parentheses.</p>
+<p>Formatting-only Markdown/LaTeX pieces are excluded. A content token appears when any scoring model is at or
+above its trajectory p95, or at least two scoring models are at or above their own trajectory p90. Values are raw
+EU followed by the within-model trajectory percentile in parentheses.</p>
 <table><tr><th>Positions</th><th>High-EU tokens</th><th>Semantic unit</th><th>Context</th>
 <th>Teachers &ge; p95</th>
 <th>Teachers &ge; p90</th>{''.join(f'<th>{html.escape(name)} EU (percentile)</th>' for name in names)}</tr>
 {semantic_table_rows}</table>
 <h2>Raw top-{top_n} EU tokens</h2>
-<p>Rows are the union of each teacher's top {top_n} tokens; the p90 count is trajectory-relative.</p>
+<p>Rows are the union of each scoring model's top {top_n} tokens; the p90 count is trajectory-relative.</p>
 <table><tr><th>Position</th><th>Token</th><th>Context</th><th>Selected by top-N</th>
 <th>Teachers ≥ p90</th>{''.join(f'<th>{html.escape(name)}</th>' for name in names)}</tr>{table_rows}</table>
 <h2>Student response</h2><pre>{html.escape(record['response'])}</pre>"""
             (trajectory_reports / html_name).write_text(page, encoding="utf-8")
-            pages.append((record["uid"], f"trajectories/{html_name}"))
+            pages.append((f"{record['uid']} ({grade_text.lower()})", f"trajectories/{html_name}"))
     flattened = [np.concatenate(parts) for parts in global_values]
     global_stats = [
         {"teacher": name, **extended_statistics(values)}
@@ -725,21 +751,21 @@ by the within-teacher trajectory percentile in parentheses.</p>
         for row in global_stats
     )
     links = "".join(f'<li><a href="{href}">{html.escape(uid)}</a></li>' for uid, href in pages)
-    report = f"""<!doctype html><meta charset="utf-8"><title>Teacher token EU report</title>
+    report = f"""<!doctype html><meta charset="utf-8"><title>{scorer_label} token EU report</title>
 <style>
 body{{font-family:system-ui;max-width:1200px;margin:24px auto}}
 table{{border-collapse:collapse;width:100%}}
 td,th{{border:1px solid #ddd;padding:6px}}
 </style>
-<h1>Three-teacher token-level EU</h1>
-<p>EU = 16 / sum(Top16(raw teacher logits) + 1), before temperature or softmax.
-Raw-logit scales are not calibrated across model sizes; compare within-teacher percentiles
+<h1>{'Student self-EU' if is_student_mode else 'Three-teacher token-level EU'}</h1>
+<p>EU = 16 / sum(Top16(raw logits) + 1), before temperature or softmax.
+Raw-logit scales are not calibrated across model sizes; compare within-model percentiles
 as well as absolute values.</p>
 <p>The saved baseline JSONL omitted original vLLM token IDs and terminal stop-token metadata.
 This report covers the visible response text reconstructed losslessly with the original student tokenizer.</p>
 <img src="teacher_distribution.svg" alt="Teacher EU distributions" style="max-width:100%">
 <h2>Corpus interval and mean</h2>
-<table><tr><th>Teacher</th><th>Finite tokens</th><th>Min</th><th>Mean</th><th>Median</th>
+<table><tr><th>{scorer_label}</th><th>Finite tokens</th><th>Min</th><th>Mean</th><th>Median</th>
 <th>p90</th><th>p95</th><th>Max</th></tr>{summary_table}</table>
 <h2>Selected trajectory reports</h2><ul>{links}</ul>
 <p>Machine-readable files: teacher_summary.json, per_trajectory_teacher_stats.csv/json,
@@ -765,9 +791,21 @@ def parse_args():
     parser.add_argument("--model-label")
     parser.add_argument("--task", default="AMC23", choices=("AIME24", "AIME25", "AMC23"))
     parser.add_argument("--output-root", type=Path, required=True)
-    parser.add_argument("--teacher-4b", type=Path, required=True)
-    parser.add_argument("--teacher-8b", type=Path, required=True)
-    parser.add_argument("--teacher-14b", type=Path, required=True)
+    parser.add_argument(
+        "--student-model",
+        type=Path,
+        help="Score self-EU with the exact student checkpoint recorded by the evaluation",
+    )
+    parser.add_argument("--teacher-4b", type=Path)
+    parser.add_argument("--teacher-8b", type=Path)
+    parser.add_argument("--teacher-14b", type=Path)
+    parser.add_argument(
+        "--example-id",
+        action="append",
+        type=int,
+        default=[],
+        help="Only score this zero-based example_id; may be supplied more than once",
+    )
     parser.add_argument("--score-chunk-size", type=int, default=128)
     parser.add_argument("--max-trajectories", type=int, default=0, help="0 means all source rollouts")
     parser.add_argument(
@@ -790,21 +828,41 @@ def main():
         args.evaluation_root, args.task, args.model_label, args.rollouts_jsonl
     )
     student_path = Path(eval_config["model_path"]).resolve()
+    teacher_paths = (args.teacher_4b, args.teacher_8b, args.teacher_14b)
+    if args.student_model:
+        if any(teacher_paths):
+            raise ValueError("--student-model cannot be combined with --teacher-4b/8b/14b")
+        if args.student_model.resolve() != student_path:
+            raise ValueError(
+                "--student-model must resolve to the exact model_path recorded in evaluation_config.json"
+            )
+        teachers = [{"name": "Student", "path": str(student_path)}]
+        scoring_mode = "student"
+    else:
+        if not all(teacher_paths):
+            raise ValueError("set --student-model, or provide all of --teacher-4b/8b/14b")
+        teachers = [
+            {"name": name, "path": str(path.resolve())}
+            for name, path in zip(token_eu.TEACHER_NAMES, teacher_paths, strict=True)
+        ]
+        scoring_mode = "teachers"
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(student_path, local_files_only=True)
+    from utils import grade_answer_verl
+
     source_rows = read_jsonl(rollout_path)
-    records = build_trajectories(source_rows, tokenizer, eval_config, args.task, args.max_trajectories)
-    teachers = [
-        {"name": name, "path": str(path.resolve())}
-        for name, path in zip(
-            token_eu.TEACHER_NAMES,
-            (args.teacher_4b, args.teacher_8b, args.teacher_14b),
-            strict=True,
-        )
-    ]
+    records = build_trajectories(
+        source_rows,
+        tokenizer,
+        eval_config,
+        args.task,
+        args.max_trajectories,
+        args.example_id,
+        grade_answer_verl,
+    )
     validation = validate_models(records, student_path, teachers)
-    plot_specs = args.plot_trajectory or ["0:0"]
+    plot_specs = args.plot_trajectory or ["index:0"]
     manifest = {
         "evaluation_root": str(args.evaluation_root.resolve()),
         "evaluation_config": str(config_path),
@@ -813,8 +871,13 @@ def main():
         "source_rollouts_sha256": file_hash(rollout_path),
         "task": args.task,
         "student_model": str(student_path),
+        "scoring_mode": scoring_mode,
+        "scoring_models": teachers,
+        "selected_example_ids": sorted(set(args.example_id)),
         "source_rows": len(source_rows),
         "selected_trajectories": len(records),
+        "rule_correct_trajectories": sum(record["rule_correct"] is True for record in records),
+        "rule_incorrect_trajectories": sum(record["rule_correct"] is False for record in records),
         "visible_response_tokens": sum(len(row["response_token_ids"]) for row in records),
         "token_reconstruction": {
             "method": "student tokenizer encode(saved visible text)",
@@ -839,17 +902,24 @@ def main():
             str(trajectories),
             "--output-root",
             str(output_root),
-            "--teacher-4b",
-            teachers[0]["path"],
-            "--teacher-8b",
-            teachers[1]["path"],
-            "--teacher-14b",
-            teachers[2]["path"],
             "--tokenizer-path",
             str(student_path),
             "--score-chunk-size",
             str(args.score_chunk_size),
         ]
+        if scoring_mode == "student":
+            command.extend(["--student-model", teachers[0]["path"]])
+        else:
+            command.extend(
+                [
+                    "--teacher-4b",
+                    teachers[0]["path"],
+                    "--teacher-8b",
+                    teachers[1]["path"],
+                    "--teacher-14b",
+                    teachers[2]["path"],
+                ]
+            )
         subprocess.run(command, check=True)
     write_json(output_root / "source_manifest.json", manifest)
     analyze_output(output_root, tokenizer, plot_specs, args.high_token_top_n)

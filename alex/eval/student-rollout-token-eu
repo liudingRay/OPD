@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Score saved student evaluation text with Qwen3-4B/8B/14B token-level EU.
-# No student generation or training occurs. Teachers run sequentially on one GPU.
+# Score saved student evaluation text with student self-EU or Qwen3-4B/8B/14B EU.
+# No student generation or training occurs. Scoring models run sequentially on one GPU.
 
 #SBATCH --job-name=eval-student-token-eu
 #SBATCH --partition=a100
@@ -32,18 +32,24 @@ LOG_DIR=${LOG_DIR:-$EXPERIMENT_ROOT/logs}
 SOURCE_EVALUATION_ROOT=${SOURCE_EVALUATION_ROOT:-$EXPERIMENT_ROOT/evaluation/Qwen3-1.7B-OPD-dynamic-LN-b0.0-tau0.1-nonthinking-r7680-step894-nonthinking-official-t0.7-p0.8-topk20-minp0.0-mnt38912-n16}
 TASK=${TASK:-AMC23}
 MODEL_LABEL=${MODEL_LABEL:-Qwen3-1.7B-OPD-dynamic-LN-b0.0-tau0.1-nonthinking-r7680-step894}
+STUDENT_MODEL_PATH=${STUDENT_MODEL_PATH:-}
 TEACHER4B_PATH=${TEACHER4B_PATH:-$MODEL_ROOT/Qwen3-4B}
 TEACHER8B_PATH=${TEACHER8B_PATH:-$MODEL_ROOT/Qwen3-8B}
 TEACHER14B_PATH=${TEACHER14B_PATH:-$MODEL_ROOT/Qwen3-14B}
+EXAMPLE_IDS=${EXAMPLE_IDS:-}
 SCORE_CHUNK_SIZE=${SCORE_CHUNK_SIZE:-128}
 MAX_TRAJECTORIES=${MAX_TRAJECTORIES:-0}
-PLOT_TRAJECTORIES=${PLOT_TRAJECTORIES:-"0:0"}
+PLOT_TRAJECTORIES=${PLOT_TRAJECTORIES:-"index:0"}
 HIGH_TOKEN_TOP_N=${HIGH_TOKEN_TOP_N:-20}
 SBATCH_TIME=${SBATCH_TIME:-24:00:00}
 JOB_NAME=${JOB_NAME:-eval-student-token-eu}
 
 if [[ -z ${EU_OUTPUT_ROOT:-} ]]; then
-    EU_OUTPUT_ROOT=$EXPERIMENT_ROOT/evaluation/teacher-token-eu-${MODEL_LABEL}-${TASK,,}-$(date +%Y%m%d-%H%M%S)
+    if [[ -n "$STUDENT_MODEL_PATH" ]]; then
+        EU_OUTPUT_ROOT=$EXPERIMENT_ROOT/evaluation/student-self-eu-${MODEL_LABEL}-${TASK,,}-$(date +%Y%m%d-%H%M%S)
+    else
+        EU_OUTPUT_ROOT=$EXPERIMENT_ROOT/evaluation/teacher-token-eu-${MODEL_LABEL}-${TASK,,}-$(date +%Y%m%d-%H%M%S)
+    fi
 fi
 
 CORE_SCRIPT=$PROJECT_DIR/scripts/val/eval/eval_student_rollout_eu.py
@@ -70,9 +76,13 @@ require_file "$SOURCE_EVALUATION_ROOT/evaluation_config.json"
 require_file "$CORE_SCRIPT"
 require_file "$BASE_SCORER"
 require_file "$EU_UTILITY"
-require_model "$TEACHER4B_PATH"
-require_model "$TEACHER8B_PATH"
-require_model "$TEACHER14B_PATH"
+if [[ -n "$STUDENT_MODEL_PATH" ]]; then
+    require_model "$STUDENT_MODEL_PATH"
+else
+    require_model "$TEACHER4B_PATH"
+    require_model "$TEACHER8B_PATH"
+    require_model "$TEACHER14B_PATH"
+fi
 [[ "$EU_OUTPUT_ROOT" == /* && ! -e "$EU_OUTPUT_ROOT" ]] || {
     echo "EU_OUTPUT_ROOT must be a new absolute path: $EU_OUTPUT_ROOT" >&2
     exit 1
@@ -88,13 +98,20 @@ ARGS=(
     --model-label "$MODEL_LABEL"
     --task "$TASK"
     --output-root "$EU_OUTPUT_ROOT"
-    --teacher-4b "$TEACHER4B_PATH"
-    --teacher-8b "$TEACHER8B_PATH"
-    --teacher-14b "$TEACHER14B_PATH"
     --score-chunk-size "$SCORE_CHUNK_SIZE"
     --max-trajectories "$MAX_TRAJECTORIES"
     --high-token-top-n "$HIGH_TOKEN_TOP_N"
 )
+if [[ -n "$STUDENT_MODEL_PATH" ]]; then
+    ARGS+=(--student-model "$STUDENT_MODEL_PATH")
+else
+    ARGS+=(--teacher-4b "$TEACHER4B_PATH" --teacher-8b "$TEACHER8B_PATH" --teacher-14b "$TEACHER14B_PATH")
+fi
+read -r -a SELECTED_EXAMPLE_IDS <<< "$EXAMPLE_IDS"
+for example_id in "${SELECTED_EXAMPLE_IDS[@]}"; do
+    [[ "$example_id" =~ ^[0-9]+$ ]] || { echo "EXAMPLE_IDS must contain nonnegative integers." >&2; exit 2; }
+    ARGS+=(--example-id "$example_id")
+done
 for spec in "${PLOT_SPECS[@]}"; do
     ARGS+=(--plot-trajectory "$spec")
 done
@@ -102,8 +119,15 @@ done
 echo "Alex student-rollout token EU configuration"
 echo "  source evaluation: $SOURCE_EVALUATION_ROOT"
 echo "  task/model:        $TASK / $MODEL_LABEL"
-echo "  teachers:          $TEACHER4B_PATH, $TEACHER8B_PATH, $TEACHER14B_PATH"
+if [[ -n "$STUDENT_MODEL_PATH" ]]; then
+    echo "  scoring mode:      student self-EU"
+    echo "  student model:     $STUDENT_MODEL_PATH"
+else
+    echo "  scoring mode:      three teachers"
+    echo "  teachers:          $TEACHER4B_PATH, $TEACHER8B_PATH, $TEACHER14B_PATH"
+fi
 echo "  output:            $EU_OUTPUT_ROOT"
+echo "  example IDs:       ${EXAMPLE_IDS:-all}"
 echo "  trajectories:      ${MAX_TRAJECTORIES} (0 means all)"
 echo "  plotted:           $PLOT_TRAJECTORIES"
 echo "  high-token top-N:  $HIGH_TOKEN_TOP_N per teacher and trajectory"
@@ -122,7 +146,8 @@ fi
 if [[ -z ${SLURM_JOB_ID:-} ]]; then
     mkdir -p "$LOG_DIR"
     export OPD_WS PROJECT_DIR OPD_ENV MODEL_ROOT EXPERIMENT_ROOT OPD_CACHE_ROOT LOG_DIR
-    export SOURCE_EVALUATION_ROOT TASK MODEL_LABEL TEACHER4B_PATH TEACHER8B_PATH TEACHER14B_PATH
+    export SOURCE_EVALUATION_ROOT TASK MODEL_LABEL STUDENT_MODEL_PATH
+    export TEACHER4B_PATH TEACHER8B_PATH TEACHER14B_PATH EXAMPLE_IDS
     export SCORE_CHUNK_SIZE MAX_TRAJECTORIES PLOT_TRAJECTORIES HIGH_TOKEN_TOP_N
     export EU_OUTPUT_ROOT SBATCH_TIME JOB_NAME
     exec sbatch \

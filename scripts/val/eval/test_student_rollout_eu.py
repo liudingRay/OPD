@@ -8,6 +8,7 @@ from pathlib import Path
 
 import eval_student_rollout_eu as evaluator
 import numpy as np
+import pytest
 
 
 class FakeTokenizer:
@@ -78,18 +79,46 @@ def test_rejects_duplicate_example_response_pairs():
         raise AssertionError("Duplicate rollout identity was accepted")
 
 
-def fixture_output(root: Path):
+def test_filters_example_ids_before_applying_trajectory_limit():
+    rows = source_rows()
+    rows.extend(
+        {
+            **row,
+            "example_id": 22,
+            "question": "Question 22",
+            "prompt": "Question 22",
+            "seed": index,
+            "_source_line": index + 3,
+        }
+        for index, row in enumerate(source_rows())
+    )
+    records = evaluator.build_trajectories(
+        rows, FakeTokenizer(), {}, "AMC23", max_trajectories=1, example_ids=[22]
+    )
+    assert len(records) == 1 and records[0]["question_uid"] == "AMC23:22"
+    with pytest.raises(ValueError, match="absent"):
+        evaluator.build_trajectories(rows, FakeTokenizer(), {}, "AMC23", example_ids=[99])
+
+
+def fixture_output(root: Path, names=None):
     tokenizer = FakeTokenizer()
     records = evaluator.build_trajectories(source_rows(), tokenizer, {}, "AMC23")
-    names = list(evaluator.token_eu.TEACHER_NAMES)
-    evaluator.write_json(root / "config.json", {"teachers": [{"name": name} for name in names]})
+    names = names or list(evaluator.token_eu.TEACHER_NAMES)
+    evaluator.write_json(
+        root / "config.json",
+        {
+            "scoring_mode": "student" if names == ["Student"] else "teachers",
+            "teachers": [{"name": name} for name in names],
+        },
+    )
     evaluator.write_json(root / "trajectories.json", records)
     tokens = root / "tokens"
     tokens.mkdir()
     for index, record in enumerate(records):
         n = len(record["response_token_ids"])
         base = np.linspace(0.1, 1.0, n, dtype=np.float64)
-        eu = np.stack([base, base[::-1] + 0.3, base * 2 + index], axis=1)
+        columns = [base, base[::-1] + 0.3, base * 2 + index]
+        eu = np.stack(columns[: len(names)], axis=1)
         np.savez_compressed(
             tokens / f"trajectory-{index:06d}.npz",
             eu=eu,
@@ -142,6 +171,16 @@ def test_analysis_exports_stats_high_tokens_and_self_contained_visuals(tmp_path)
     trajectory_report = (analysis / "trajectories/trajectory-000000.html").read_text()
     assert "Semantic high-EU tokens" in trajectory_report
     assert "EU (percentile)" in trajectory_report
+
+
+def test_analysis_supports_single_student_scorer(tmp_path):
+    tokenizer, _ = fixture_output(tmp_path, ["Student"])
+    evaluator.analyze_output(tmp_path, tokenizer, ["all"], top_n=2)
+    report = (tmp_path / "analysis/report.html").read_text()
+    assert "Student self-EU" in report
+    summary = json.loads((tmp_path / "analysis/teacher_summary.json").read_text())
+    assert [row["teacher"] for row in summary] == ["Student"]
+    assert len(list((tmp_path / "analysis/trajectories").glob("*.html"))) == 2
 
 
 def test_semantic_token_filter_drops_scaffolding_but_keeps_math_content():

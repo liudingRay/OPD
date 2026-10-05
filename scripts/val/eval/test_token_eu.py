@@ -110,18 +110,22 @@ def test_legacy_records_and_validation(tmp_path):
             evaluator.load_trajectories(path)
 
 
-def fixture_scores(tmp_path):
+def fixture_scores(tmp_path, names=None):
     path = source_file(tmp_path)
     before = path.read_bytes()
     _, rows = evaluator.load_trajectories(path)
     root = tmp_path / "output"
     root.mkdir()
     evaluator.write_json(root / "trajectories.json", rows)
+    names = names or evaluator.TEACHER_NAMES
     evaluator.write_json(
         root / "config.json",
-        {"teachers": [{"name": n} for n in evaluator.TEACHER_NAMES]},
+        {
+            "scoring_mode": "student" if names == ("Student",) else "teachers",
+            "teachers": [{"name": n} for n in names],
+        },
     )
-    for j, name in enumerate(evaluator.TEACHER_NAMES):
+    for j, name in enumerate(names):
         directory = root / "teachers" / name
         directory.mkdir(parents=True)
         for i, row in enumerate(rows):
@@ -189,6 +193,18 @@ def test_export_rejects_mismatched_prefix_even_when_lengths_match(tmp_path):
     with pytest.raises(ValueError, match="prefix/token identity"):
         evaluator.summarize(root, SimpleNamespace(convert_ids_to_tokens=lambda x: x))
     assert not (root / "COMPLETED.json").exists()
+
+
+def test_export_supports_one_student_scorer(tmp_path):
+    root, rows, _, _ = fixture_scores(tmp_path, ("Student",))
+    tokenizer = SimpleNamespace(convert_ids_to_tokens=lambda ids: [f"token-{i}" for i in ids])
+    evaluator.summarize(root, tokenizer)
+    with np.load(root / "tokens/trajectory-000000.npz", allow_pickle=False) as joined:
+        assert joined["eu"].shape == (len(rows[0]["response_token_ids"]), 1)
+        np.testing.assert_array_equal(joined["teacher_names"], ["Student"])
+    summary = evaluator.read_json(root / "summary.json")
+    assert [row["teacher"] for row in summary["teachers"]] == ["Student"]
+    assert summary["pairwise"] == []
 
 
 def test_statistics_reports_nonfinite_and_preserves_negative_values():

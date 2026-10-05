@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Score saved student token trajectories with raw top-16 EU from three teachers.
+"""Score saved student trajectories with raw top-16 EU from one student or three teachers.
 
 No generation, re-tokenization, temperature scaling, training, or normalization.
-Each teacher runs in its own process on one GPU; completed per-trajectory scores
+Each scoring model runs in its own process on one GPU; completed per-trajectory scores
 are retained if a later phase fails. Existing output roots are never replaced.
 """
 
@@ -291,7 +291,7 @@ def worker(config_path, name):
     config = read_json(config_path)
     teacher = next(t for t in config["teachers"] if t["name"] == name)
     if model_files(teacher["path"]) != teacher["files"]:
-        raise ValueError(f"Teacher model files changed after preflight: {name}")
+        raise ValueError(f"Scoring model files changed after preflight: {name}")
     if file_hash(EU_MODULE) != config["eu_source_sha256"]:
         raise ValueError("Shared EU code changed after preflight")
     if file_hash(root / "trajectories.json") != config["trajectory_snapshot_sha256"]:
@@ -376,7 +376,7 @@ def statistics(values):
 
 
 def summarize(root, tokenizer):
-    """Join teachers on saved trajectory identity/token IDs, never array length alone."""
+    """Join scorers on saved trajectory identity/token IDs, never array length alone."""
     import numpy as np
 
     root = Path(root)
@@ -385,7 +385,7 @@ def summarize(root, tokenizer):
     names = [t["name"] for t in config["teachers"]]
     for name in names:
         if not (root / "teachers" / name / "COMPLETED.json").is_file():
-            raise ValueError(f"Teacher scoring incomplete: {name}")
+            raise ValueError(f"Scoring incomplete: {name}")
     joined = root / "tokens"
     joined.mkdir(exist_ok=False)
     summary_rows, corpus, token_counts = [], [], 0
@@ -425,7 +425,7 @@ def summarize(root, tokenizer):
                         expected = (n, 16) if key.startswith("top16_") else (n,)
                         if scores[key].shape != expected:
                             raise ValueError(
-                                f"Mismatched teacher score shape: {path} {key}"
+                                f"Mismatched scorer output shape: {path} {key}"
                             )
                         parts.append(scores[key].copy())
             arrays = {key: np.stack(values, axis=1) for key, values in columns.items()}
@@ -511,7 +511,7 @@ def summarize(root, tokenizer):
         "No normalization or temperature scaling. Finite valid-response-token statistics; std is population std.",
         "Different raw logit scales can give different EU scales; correlation alone does not imply calibration.",
         "",
-        "| Teacher | Valid tokens | Mean | Std | Min | Median | p90 | Max | Nonfinite |",
+        "| Scoring model | Valid tokens | Mean | Std | Min | Median | p90 | Max | Nonfinite |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in global_stats:
@@ -552,8 +552,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trajectories", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument(
+        "--student-model",
+        type=Path,
+        help="Score with one student model instead of the three-teacher mode",
+    )
     for scale in ("4b", "8b", "14b"):
-        parser.add_argument(f"--teacher-{scale}", type=Path, required=True)
+        parser.add_argument(f"--teacher-{scale}", type=Path)
     parser.add_argument(
         "--tokenizer-path",
         type=Path,
@@ -580,10 +585,20 @@ def main():
     source, records = load_trajectories(source)
     if file_hash(source) != source_hash:
         raise ValueError("Source trajectory file changed while reading")
-    teachers = [
-        {"name": name, "path": str(getattr(args, f"teacher_{scale}"))}
-        for name, scale in zip(TEACHER_NAMES, ("4b", "8b", "14b"), strict=True)
-    ]
+    teacher_paths = [args.teacher_4b, args.teacher_8b, args.teacher_14b]
+    if args.student_model:
+        if any(teacher_paths):
+            parser.error("--student-model cannot be combined with --teacher-4b/8b/14b")
+        teachers = [{"name": "Student", "path": str(args.student_model.resolve())}]
+        scoring_mode = "student"
+    else:
+        if not all(teacher_paths):
+            parser.error("set --student-model, or provide all of --teacher-4b/8b/14b")
+        teachers = [
+            {"name": name, "path": str(path.resolve())}
+            for name, path in zip(TEACHER_NAMES, teacher_paths, strict=True)
+        ]
+        scoring_mode = "teachers"
     origin = preflight(source, records, teachers, args.tokenizer_path)
     config = {
         "schema_version": 1,
@@ -597,6 +612,7 @@ def main():
         "source_trajectories": str(source),
         "source_sha256": source_hash,
         "source_metadata": origin,
+        "scoring_mode": scoring_mode,
         "teachers": teachers,
         "eu_source_sha256": file_hash(EU_MODULE),
         "scorer_sha256": file_hash(__file__),
@@ -618,7 +634,7 @@ def main():
     config["trajectory_snapshot_sha256"] = file_hash(root / "trajectories.json")
     write_json(root / "config.json", config)
     try:
-        for name in TEACHER_NAMES:
+        for name in (teacher["name"] for teacher in teachers):
             subprocess.run(
                 [
                     sys.executable,
