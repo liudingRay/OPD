@@ -46,6 +46,7 @@ class EvalConfig:
     top_k: int
     min_p: float
     max_tokens: int
+    seed: int
     enable_thinking: bool
     overwrite: bool
 
@@ -112,6 +113,7 @@ def run_model(config: EvalConfig) -> dict[str, object]:
         trust_remote_code=True,
         gpu_memory_utilization=0.9,
         tensor_parallel_size=1,
+        seed=config.seed,
     )
     tokenizer = llm.get_tokenizer()
     stop_token_ids = []
@@ -139,14 +141,6 @@ def run_model(config: EvalConfig) -> dict[str, object]:
                 )
                 for sample in samples
             ]
-            sampling_params = SamplingParams(
-                temperature=config.temperature,
-                top_p=config.top_p,
-                top_k=config.top_k,
-                min_p=config.min_p,
-                max_tokens=config.max_tokens,
-                stop_token_ids=stop_token_ids or None,
-            )
             results = []
             for rollout_id in tqdm(
                 range(config.num_samples),
@@ -154,6 +148,16 @@ def run_model(config: EvalConfig) -> dict[str, object]:
                 position=int(config.gpu_id) if config.gpu_id.isdigit() else 0,
                 leave=False,
             ):
+                rollout_seed = config.seed + rollout_id
+                sampling_params = SamplingParams(
+                    temperature=config.temperature,
+                    top_p=config.top_p,
+                    top_k=config.top_k,
+                    min_p=config.min_p,
+                    max_tokens=config.max_tokens,
+                    stop_token_ids=stop_token_ids or None,
+                    seed=rollout_seed,
+                )
                 outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
                 for sample, output in zip(samples, outputs, strict=True):
                     results.append(
@@ -162,7 +166,7 @@ def run_model(config: EvalConfig) -> dict[str, object]:
                             "question": sample["question"],
                             "prompt": PROMPT_TEMPLATE.format(problem=sample["question"]),
                             "answer": sample["answer"],
-                            "seed": rollout_id,
+                            "seed": rollout_seed,
                             "response": output.outputs[0].text,
                         }
                     )
@@ -212,6 +216,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=-1)
     parser.add_argument("--min-p", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, default=31744)
+    parser.add_argument("--seed", type=int, default=0, help="Base seed; rollout i uses seed + i.")
     parser.add_argument("--enable-thinking", action="store_true", help="Disabled by default for this baseline run.")
     parser.add_argument("--overwrite", action="store_true", help="Regenerate result files that already exist.")
     return parser.parse_args()
@@ -221,6 +226,8 @@ def main() -> None:
     args = parse_args()
     if args.num_samples <= 0:
         raise ValueError("--num-samples must be positive.")
+    if args.seed < 0:
+        raise ValueError("--seed must be non-negative.")
     gpu_ids = [gpu_id.strip() for gpu_id in args.gpu_ids.split(",") if gpu_id.strip()]
     model_specs = args.model or [(label, str(args.model_root / label)) for label in DEFAULT_MODELS]
     if args.serial:
@@ -249,6 +256,7 @@ def main() -> None:
             top_k=args.top_k,
             min_p=args.min_p,
             max_tokens=args.max_tokens,
+            seed=args.seed,
             enable_thinking=args.enable_thinking,
             overwrite=args.overwrite,
         )

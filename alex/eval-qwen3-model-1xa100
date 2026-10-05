@@ -49,6 +49,7 @@ TOP_P=${TOP_P:-0.8}
 TOP_K=${TOP_K:-20}
 MIN_P=${MIN_P:-0.0}
 MAX_TOKENS=${MAX_TOKENS:-38912}
+SEED=${SEED:-0}
 EVAL_OVERWRITE=${EVAL_OVERWRITE:-0}
 
 case "$ENABLE_THINKING" in
@@ -65,13 +66,21 @@ case "$EVAL_OVERWRITE" in
         exit 2
         ;;
 esac
+if [[ ! "$SEED" =~ ^[0-9]+$ ]]; then
+    echo "SEED must be a non-negative integer; got: $SEED" >&2
+    exit 2
+fi
 
 THINKING_LABEL=nonthinking
 if [[ "$ENABLE_THINKING" == 1 ]]; then
     THINKING_LABEL=thinking
 fi
 
-EVAL_PROTOCOL_LABEL=${EVAL_PROTOCOL_LABEL:-puhui-t${TEMPERATURE}-p${TOP_P}-topk${TOP_K}-minp${MIN_P}-mnt${MAX_TOKENS}}
+SEED_LABEL=
+if [[ "$SEED" != 0 ]]; then
+    SEED_LABEL=-seed${SEED}
+fi
+EVAL_PROTOCOL_LABEL=${EVAL_PROTOCOL_LABEL:-puhui-t${TEMPERATURE}-p${TOP_P}-topk${TOP_K}-minp${MIN_P}-mnt${MAX_TOKENS}${SEED_LABEL}}
 EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$EXPERIMENT_ROOT/evaluation/$MODEL_NAME-$THINKING_LABEL-$EVAL_PROTOCOL_LABEL-n$NUM_SAMPLES}
 LOG_DIR=${LOG_DIR:-$EXPERIMENT_ROOT/logs}
 
@@ -119,6 +128,7 @@ echo "  tasks:           $TASKS"
 echo "  thinking:        $ENABLE_THINKING"
 echo "  samples:         $NUM_SAMPLES"
 echo "  sampling:        temperature=$TEMPERATURE, top_p=$TOP_P, top_k=$TOP_K, min_p=$MIN_P"
+echo "  base seed:       $SEED (rollout i uses seed+i)"
 echo "  max tokens:      $MAX_TOKENS"
 echo "  overwrite:       $EVAL_OVERWRITE"
 echo "  resources:       1 x A100-80GB, 8 CPUs, time=24:00:00"
@@ -131,7 +141,7 @@ fi
 if [[ -z ${SLURM_JOB_ID:-} ]]; then
     mkdir -p "$LOG_DIR"
     export OPD_WS PROJECT_DIR OPD_ENV MODEL_ROOT EXPERIMENT_ROOT OPD_CACHE_ROOT
-    export MODEL_NAME MODEL_PATH ENABLE_THINKING TASKS NUM_SAMPLES
+    export MODEL_NAME MODEL_PATH ENABLE_THINKING TASKS NUM_SAMPLES SEED
     export TEMPERATURE TOP_P TOP_K MIN_P MAX_TOKENS EVAL_OVERWRITE
     export EVAL_PROTOCOL_LABEL
     export EVAL_OUTPUT_ROOT LOG_DIR
@@ -215,6 +225,7 @@ GENERATOR_ARGS=(
     --top-k "$TOP_K"
     --min-p "$MIN_P"
     --max-tokens "$MAX_TOKENS"
+    --seed "$SEED"
 )
 if [[ "$ENABLE_THINKING" == 1 ]]; then
     GENERATOR_ARGS+=(--enable-thinking)
