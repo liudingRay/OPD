@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Dedicated Alex evaluation entrypoint for MMLU-Pro.
+#
+# Formal protocol: one non-thinking sample per question with the reusable AIME
+# evaluator's temperature, top-p, top-k, min-p, response budget, and base seed.
+# SMOKE=1 evaluates four questions once each in an isolated output root.
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+if [[ -z ${MODEL_NAME:-} || -z ${MODEL_PATH:-} ]]; then
+    echo "Set both MODEL_NAME and the absolute MODEL_PATH for the model to evaluate." >&2
+    exit 2
+fi
+if [[ "$MODEL_PATH" != /* ]]; then
+    echo "MODEL_PATH must be absolute; got: $MODEL_PATH" >&2
+    exit 2
+fi
+
+if [[ -z ${PROJECT_DIR:-} ]]; then
+    if [[ -n ${OPD_WS:-} ]]; then
+        PROJECT_DIR=$OPD_WS/OPD
+    elif command -v ws_find >/dev/null 2>&1; then
+        PROJECT_DIR=$(ws_find opd)/OPD
+    else
+        echo "ws_find is unavailable. Run this launcher on Alex or set PROJECT_DIR explicitly." >&2
+        exit 1
+    fi
+fi
+
+export PROJECT_DIR
+export DATA_DIR=${DATA_DIR:-$PROJECT_DIR/datasets/test_data}
+export ENABLE_THINKING=0
+export TASKS=MMLU-Pro
+export NUM_SAMPLES=1
+
+case "${SMOKE:-0}" in
+    0)
+        export MAX_EXAMPLES=
+        SCOPE_LABEL=
+        ;;
+    1)
+        export MAX_EXAMPLES=4
+        SCOPE_LABEL=-smoke4
+        export EVAL_JOB_NAME=${EVAL_JOB_NAME:-eval-mmlupro-smoke}
+        export EVAL_TIME_LIMIT=${EVAL_TIME_LIMIT:-00:30:00}
+        ;;
+    *)
+        echo "SMOKE must be 0 or 1; got: $SMOKE" >&2
+        exit 2
+        ;;
+esac
+
+export TEMPERATURE=0.7
+export TOP_P=0.8
+export TOP_K=20
+export MIN_P=0.0
+export MAX_TOKENS=38912
+export SEED=0
+export EVAL_JOB_NAME=${EVAL_JOB_NAME:-eval-mmlupro}
+export EVAL_TIME_LIMIT=${EVAL_TIME_LIMIT:-24:00:00}
+export EVAL_PROTOCOL_LABEL=${EVAL_PROTOCOL_LABEL:-mmlupro${SCOPE_LABEL}-t${TEMPERATURE}-p${TOP_P}-topk${TOP_K}-minp${MIN_P}-mnt${MAX_TOKENS}}
+
+exec bash "$SCRIPT_DIR/eval-qwen3-model-1xa100"

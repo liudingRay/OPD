@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Retired compatibility entrypoint. GPQA and MMLU-Pro now have independent
+# launchers because they use different sample counts and output roots.
+
+set -euo pipefail
+
+echo "This combined launcher is retired." >&2
+echo "Use alex/eval-gpqa-qwen3-model-1xa100 for GPQA (n=8)." >&2
+echo "Use alex/eval-mmlupro-qwen3-model-1xa100 for MMLU-Pro (n=1)." >&2
+exit 2
