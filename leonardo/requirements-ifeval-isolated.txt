@@ -1,6 +1,7 @@
 # Leonardo-only scorer additions. Install with --no-deps into the dedicated
 # IFEVAL_DEPS_DIR; click, regex, tqdm, packaging, and six remain provided by
 # the validated opd-cu118 environment.
+defusedxml==0.7.1
 immutabledict==4.3.1
 joblib==1.6.0
 langdetect==1.0.9
