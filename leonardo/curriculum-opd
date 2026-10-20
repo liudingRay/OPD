@@ -141,6 +141,7 @@ esac
 
 SMOKE=${SMOKE:-0}
 SMOKE_STEPS=${SMOKE_STEPS:-1}
+SMOKE_NNODES=${SMOKE_NNODES:-1}
 SMOKE_GPUS=${SMOKE_GPUS:-1}
 SMOKE_CPUS=${SMOKE_CPUS:-8}
 SMOKE_TIME=${SMOKE_TIME:-01:00:00}
@@ -149,7 +150,11 @@ SMOKE_PRESERVE_SCIENTIFIC_SETTINGS=${SMOKE_PRESERVE_SCIENTIFIC_SETTINGS:-0}
 # Multi-teacher wrappers opt into preserving their production batch/sampling/
 # length settings so the bounded job still exercises the real EULN path.
 if [[ "$SMOKE" == 1 ]]; then
-    TRAINER_NNODES=1
+    if ! [[ "$SMOKE_NNODES" =~ ^[1-9][0-9]*$ ]]; then
+        echo "SMOKE_NNODES must be a positive integer; got: $SMOKE_NNODES" >&2
+        exit 2
+    fi
+    TRAINER_NNODES=$SMOKE_NNODES
     SBATCH_GPUS=$SMOKE_GPUS
     SBATCH_CPUS=$SMOKE_CPUS
     SBATCH_TIME=$SMOKE_TIME
@@ -502,7 +507,7 @@ echo "W&B run: project=$WANDB_PROJECT, id=$WANDB_RUN_ID, mode=$WANDB_MODE, resum
 mapfile -t NODES < <(scontrol show hostnames "$SLURM_JOB_NODELIST")
 HEAD_NODE=${NODES[0]}
 RAY_INIT_ARGS=("ray_kwargs.ray_init.num_cpus=null")
-if [[ "$SMOKE" == 1 ]]; then
+if [[ "$SMOKE" == 1 && "$TRAINER_NNODES" == 1 ]]; then
     unset RAY_ADDRESS
     RAY_INIT_ARGS=("ray_kwargs.ray_init.num_cpus=$SBATCH_CPUS" "+ray_kwargs.ray_init._temp_dir=$RAY_TEMP_DIR")
 else
@@ -532,14 +537,14 @@ echo "Ray head: ${RAY_ADDRESS}"
 
 srun --overlap --nodes=1 --ntasks=1 -w "$HEAD_NODE" \
     env -u ROCR_VISIBLE_DEVICES ray start --head --node-ip-address="$HEAD_IP" --port="$RAY_PORT" \
-    --num-cpus="$SLURM_CPUS_PER_TASK" --num-gpus=4 --block &
+    --num-cpus="$SLURM_CPUS_PER_TASK" --num-gpus="$SBATCH_GPUS" --block &
 sleep 10
 
 for ((NODE_INDEX = 1; NODE_INDEX < ${#NODES[@]}; NODE_INDEX++)); do
     WORKER_NODE=${NODES[$NODE_INDEX]}
     srun --overlap --nodes=1 --ntasks=1 -w "$WORKER_NODE" \
         env -u ROCR_VISIBLE_DEVICES ray start --address="$RAY_ADDRESS" --num-cpus="$SLURM_CPUS_PER_TASK" \
-        --num-gpus=4 --block &
+        --num-gpus="$SBATCH_GPUS" --block &
     sleep 5
 done
 RAY_INIT_ARGS+=("+ray_kwargs.ray_init.address=$RAY_ADDRESS")
