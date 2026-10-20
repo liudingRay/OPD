@@ -20,6 +20,11 @@ export GENERATION_TOP_K=${GENERATION_TOP_K:-20}
 export VAL_TEMPERATURE=${VAL_TEMPERATURE:-0.7}
 export VAL_TOP_P=${VAL_TOP_P:-0.8}
 export VAL_TOP_K=${VAL_TOP_K:-$GENERATION_TOP_K}
+# CUDA Graph capture can deadlock with pending NCCL work in Leonardo's
+# torch 2.6.0 + vLLM 0.8.5 hybrid-engine runtime. Eager rollout avoids that
+# startup-only optimization without changing sampling or EULN training math.
+export ROLLOUT_ENFORCE_EAGER=${ROLLOUT_ENFORCE_EAGER:-True}
+export CUDAGRAPH_CAPTURE_SIZES=${CUDAGRAPH_CAPTURE_SIZES:-null}
 export TRAINER_SAVE_FREQ=${TRAINER_SAVE_FREQ:-400}
 export TRAINER_PROTECTED_CHECKPOINT_STEPS=${TRAINER_PROTECTED_CHECKPOINT_STEPS:-'[400,800]'}
 export TRAINER_TOTAL_TRAINING_STEPS=${TRAINER_TOTAL_TRAINING_STEPS:-1118}
