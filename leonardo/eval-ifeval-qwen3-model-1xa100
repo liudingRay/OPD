@@ -12,7 +12,7 @@
 #     bash leonardo/eval-ifeval-qwen3-model-1xa100
 
 #SBATCH --job-name=eval-ifeval
-#SBATCH --account=EUHPC_D33_157
+#SBATCH --account=AIFAC_S07_051
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -52,6 +52,7 @@ EVAL_OVERWRITE=${EVAL_OVERWRITE:-0}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.9}
 DTYPE=${DTYPE:-auto}
 EVAL_OUTPUT_ROOT=${EVAL_OUTPUT_ROOT:-$PROJECT_DIR/scripts/val/eval/justrl_eval_outputs/ifeval}
+EVAL_ACCOUNT=${EVAL_ACCOUNT:-AIFAC_S07_051}
 EVAL_JOB_NAME=${EVAL_JOB_NAME:-eval-ifeval}
 EVAL_TIME_LIMIT=${EVAL_TIME_LIMIT:-24:00:00}
 LOG_DIR=${LOG_DIR:-$PROJECT_DIR/logs}
@@ -141,6 +142,7 @@ echo "  max tokens:      $MAX_TOKENS"
 echo "  overwrite:       $EVAL_OVERWRITE"
 echo "  scorer packages: $IFEVAL_DEPS_DIR"
 echo "  NLTK data:       $NLTK_DATA"
+echo "  Slurm account:   $EVAL_ACCOUNT"
 echo "  Slurm resources: 1 x A100, 8 CPUs, 120G RAM, time=$EVAL_TIME_LIMIT"
 
 if [[ "$DRY_RUN" == 1 ]]; then
@@ -153,9 +155,10 @@ if [[ -z ${SLURM_JOB_ID:-} ]]; then
     export PROJECT_DIR CONDA_BASE CONDA_ENV OPD_CACHE_ROOT IFEVAL_DEPS_DIR NLTK_DATA
     export MODEL_NAME MODEL_PATH ENABLE_THINKING NUM_SAMPLES TEMPERATURE TOP_P TOP_K MIN_P
     export MAX_TOKENS SEED MAX_EXAMPLES EVAL_OVERWRITE GPU_MEMORY_UTILIZATION DTYPE
-    export EVAL_OUTPUT_ROOT EVAL_JOB_NAME EVAL_TIME_LIMIT LOG_DIR
+    export EVAL_OUTPUT_ROOT EVAL_ACCOUNT EVAL_JOB_NAME EVAL_TIME_LIMIT LOG_DIR
     SCRIPT_PATH=$(realpath "$0")
     exec sbatch \
+        --account="$EVAL_ACCOUNT" \
         --job-name="$EVAL_JOB_NAME" \
         --time="$EVAL_TIME_LIMIT" \
         --export=ALL \

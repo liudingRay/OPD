@@ -144,6 +144,7 @@ class IFEvalPipelineTest(unittest.TestCase):
             "SEED=${SEED:-0}",
             "IFEVAL_DEPS_DIR=${IFEVAL_DEPS_DIR:-$OPD_CACHE_ROOT/ifeval-scorer-py312}",
             "NLTK_DATA=${NLTK_DATA:-$OPD_CACHE_ROOT/nltk-ifeval}",
+            "EVAL_ACCOUNT=${EVAL_ACCOUNT:-AIFAC_S07_051}",
         )
         for assignment in expected_defaults:
             with self.subTest(assignment=assignment):
