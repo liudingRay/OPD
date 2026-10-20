@@ -18,9 +18,17 @@ nnodes: 0
 model_paths: null
 teacher_names: null
 teacher_weights: null
+# fixed: configured weights; ln_softmax: legacy softmax(L*N/tau);
+# eu_ln_softmax: student-EU-controlled, teacher-centered, batch-standardized log L/N routing.
 teacher_weight_mode: fixed
 teacher_ema_beta: 0.9
+# Shared routing temperature for both dynamic modes; must be finite and > 0.
 teacher_selection_tau: 0.1
+# eu_ln_softmax coefficient adjustment: k, U0, and coefficient clipping bounds.
+teacher_eu_coefficient_gain: 15.0
+teacher_eu_normalized_center: 0.25
+teacher_eu_coefficient_min: 0.1
+teacher_eu_coefficient_max: 1.9
 
 # FSDP strategy: "fsdp" or "fsdp2"
 strategy: ???

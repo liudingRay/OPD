@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Raw LogTokU diagnostics. These values never enter OPD rewards or weights."""
+"""Shared raw LogTokU computation and optional teacher diagnostics."""
 
 from collections.abc import Sequence
 

@@ -52,9 +52,16 @@ class RewardModelConfig(BaseConfig):
     model_paths: Optional[list[str]] = None
     teacher_names: Optional[list[str]] = None
     teacher_weights: Optional[list[float]] = None
+    # fixed, legacy ln_softmax, or normalized student-EU-controlled eu_ln_softmax
     teacher_weight_mode: str = "fixed"
     teacher_ema_beta: float = 0.9
+    # Shared routing temperature for both dynamic modes.
     teacher_selection_tau: float = 0.1
+    # EU-controlled coefficient adjustment: U=r_EU/0.05, centered at U0.
+    teacher_eu_coefficient_gain: float = 15.0
+    teacher_eu_normalized_center: float = 0.25
+    teacher_eu_coefficient_min: float = 0.1
+    teacher_eu_coefficient_max: float = 1.9
 
     # reward model args
     rollout: RolloutConfig = field(default_factory=RolloutConfig)

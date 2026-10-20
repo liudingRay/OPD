@@ -56,6 +56,7 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.metric import reduce_metrics
 from verl.utils.rollout_skip import RolloutSkip
+from verl.utils.semantic_tokens import semantic_token_mask
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -1077,6 +1078,8 @@ class RayPPOTrainer:
                                 # pass global_steps and is_plot config to rm_wg
                                 batch.meta_info["global_steps"] = self.global_steps
                                 batch.meta_info["is_plot"] = self.config.trainer.get("is_plot", False)
+                                if "response_mask" not in batch.batch:
+                                    batch.batch["response_mask"] = compute_response_mask(batch)
                                 rm_scores = self.rm_wg.compute_rm_score(batch)
                                 batch = batch.union(rm_scores)
                             reward_baseline_tensor, _ = compute_reward(batch, self.reward_fn)
@@ -1112,7 +1115,16 @@ class RayPPOTrainer:
                             with marked_timer("compute_log_prob", timing_raw, color="blue"):
                                 # First forward, get student top k ids and log probs
                                 print("First forward, get student top k ids and log probs")
+                                teacher_weight_mode = self.config.reward_model.get("teacher_weight_mode", "fixed")
+                                if teacher_weight_mode not in ("fixed", "ln_softmax", "eu_ln_softmax"):
+                                    raise ValueError(f"Unknown teacher weight mode: {teacher_weight_mode}")
+                                batch.meta_info["compute_student_eu"] = teacher_weight_mode == "eu_ln_softmax"
+                                if teacher_weight_mode == "eu_ln_softmax":
+                                    batch.batch["semantic_token_mask"] = semantic_token_mask(
+                                        self.tokenizer, batch.batch["responses"]
+                                    ).to(batch.batch["responses"].device)
                                 old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                                batch.meta_info.pop("compute_student_eu", None)
 
                                 # if "entropys" in old_log_prob.batch.keys():
                                 #    old_log_prob.batch.pop("entropys")
@@ -1138,17 +1150,27 @@ class RayPPOTrainer:
                                 ("teacher_weight_mode", "fixed"),
                                 ("teacher_ema_beta", 0.9),
                                 ("teacher_selection_tau", 0.1),
+                                ("teacher_eu_coefficient_gain", 15.0),
+                                ("teacher_eu_normalized_center", 0.25),
+                                ("teacher_eu_coefficient_min", 0.1),
+                                ("teacher_eu_coefficient_max", 1.9),
                             ):
                                 batch.meta_info[key] = self.config.reward_model.get(key, default)
-                            if batch.meta_info["teacher_weight_mode"] not in ("fixed", "ln_softmax"):
+                            if batch.meta_info["teacher_weight_mode"] not in (
+                                "fixed",
+                                "ln_softmax",
+                                "eu_ln_softmax",
+                            ):
                                 raise ValueError("Unknown teacher weight mode")
-                            if batch.meta_info["teacher_weight_mode"] == "ln_softmax" and (
+                            if batch.meta_info["teacher_weight_mode"] in ("ln_softmax", "eu_ln_softmax") and (
                                 top_k <= 0
                                 or strategy != "only_stu"
                                 or reward_weight_mode != "student_p"
                                 or not self.config.reward_model.get("model_paths")
                             ):
-                                raise ValueError("LN-softmax requires teacher model_paths and only_stu/student_p top-k")
+                                raise ValueError(
+                                    "Dynamic teacher routing requires teacher model_paths and only_stu/student_p top-k"
+                                )
                             teacher_weights = self.config.reward_model.get("teacher_weights", None)
                             teacher_names = self.config.reward_model.get("teacher_names", None)
                             if teacher_weights is not None:
@@ -1194,14 +1216,38 @@ class RayPPOTrainer:
                                         "teacher_on_student_log_probs_by_teacher",
                                         "teacher_overlap_mask_by_teacher", "response_mask", "rm_scores",
                                         "dynamic_teacher_overlap_mass", "dynamic_teacher_learnability",
-                                        "dynamic_teacher_js", "dynamic_teacher_utility", "dynamic_teacher_weight",
+                                        "dynamic_teacher_js", "dynamic_teacher_utility",
+                                        "dynamic_teacher_log_routing_score", "dynamic_teacher_weight",
+                                        "dynamic_teacher_centered_log_learnability",
+                                        "dynamic_teacher_centered_log_novelty",
+                                        "dynamic_teacher_normalized_log_learnability",
+                                        "dynamic_teacher_normalized_log_novelty",
+                                        "dynamic_teacher_learnability_scale", "dynamic_teacher_novelty_scale",
+                                        "student_eu", "semantic_token_mask",
+                                        "dynamic_teacher_semantic_high_eu_rate",
+                                        "dynamic_teacher_eu_normalized_uncertainty",
+                                        "dynamic_teacher_learnability_coefficient",
+                                        "dynamic_teacher_novelty_coefficient",
                                     ]
                                     audit_path = os.path.join(audit_dir, f"step-{self.global_steps}.pt")
                                     with open(audit_path, "xb") as audit_file:
                                         torch.save({
-                                            "tensors": {key: batch.batch[key][:4].detach().cpu() for key in audit_keys},
+                                            "tensors": {
+                                                key: batch.batch[key][:4].detach().cpu()
+                                                for key in audit_keys
+                                                if key in batch.batch
+                                            },
                                             "beta": batch.meta_info["teacher_ema_beta"],
                                             "tau": batch.meta_info["teacher_selection_tau"],
+                                            "eu_coefficient_gain": batch.meta_info[
+                                                "teacher_eu_coefficient_gain"
+                                            ],
+                                            "eu_normalized_center": batch.meta_info[
+                                                "teacher_eu_normalized_center"
+                                            ],
+                                            "eu_coefficient_min": batch.meta_info["teacher_eu_coefficient_min"],
+                                            "eu_coefficient_max": batch.meta_info["teacher_eu_coefficient_max"],
+                                            "mode": batch.meta_info["teacher_weight_mode"],
                                             "step": self.global_steps,
                                         }, audit_file)
                                     print(f"Dynamic teacher audit saved: {audit_path}", flush=True)
@@ -1212,15 +1258,74 @@ class RayPPOTrainer:
                                     names = batch.meta_info.get(
                                         "teacher_names", [f"teacher_{i}" for i in range(weights.shape[-1])]
                                     )
-                                    for key in ("overlap_mass", "learnability", "js", "utility", "weight"):
+                                    diagnostic_keys = ["overlap_mass", "learnability", "js"]
+                                    if "dynamic_teacher_utility" in batch.batch:
+                                        diagnostic_keys.append("utility")
+                                    if "dynamic_teacher_log_routing_score" in batch.batch:
+                                        diagnostic_keys.append("log_routing_score")
+                                    for key in (
+                                        "centered_log_learnability",
+                                        "centered_log_novelty",
+                                        "normalized_log_learnability",
+                                        "normalized_log_novelty",
+                                    ):
+                                        if f"dynamic_teacher_{key}" in batch.batch:
+                                            diagnostic_keys.append(key)
+                                    diagnostic_keys.append("weight")
+                                    for key in diagnostic_keys:
                                         values = batch.batch[f"dynamic_teacher_{key}"][valid].float()
                                         if values.shape[0]:
                                             for index, name in enumerate(names):
                                                 column = values[:, index]
-                                                prefix = f"teacher/{name}/{key}"
+                                                label = (
+                                                    "novelty"
+                                                    if key == "js"
+                                                    and batch.meta_info["teacher_weight_mode"] == "eu_ln_softmax"
+                                                    else key
+                                                )
+                                                prefix = f"teacher/{name}/{label}"
                                                 metrics[prefix] = column.mean().item()
+                                                metrics[f"{prefix}_std"] = column.std(unbiased=False).item()
+                                                metrics[f"{prefix}_min"] = column.min().item()
+                                                metrics[f"{prefix}_max"] = column.max().item()
                                                 for label, q in (("p10", 0.1), ("p50", 0.5), ("p90", 0.9)):
                                                     metrics[f"{prefix}_{label}"] = torch.quantile(column, q).item()
+                                    for key in (
+                                        "semantic_high_eu_rate",
+                                        "eu_normalized_uncertainty",
+                                        "learnability_coefficient",
+                                        "novelty_coefficient",
+                                        "learnability_scale",
+                                        "novelty_scale",
+                                    ):
+                                        tensor_key = f"dynamic_teacher_{key}"
+                                        if tensor_key in batch.batch:
+                                            values = batch.batch[tensor_key].float()
+                                            prefix = f"teacher/{key}"
+                                            metrics[f"{prefix}_mean"] = values.mean().item()
+                                            metrics[f"{prefix}_std"] = values.std(unbiased=False).item()
+                                            metrics[f"{prefix}_min"] = values.min().item()
+                                            metrics[f"{prefix}_max"] = values.max().item()
+                                    if "student_eu" in batch.batch:
+                                        finite_eu = torch.isfinite(batch.batch["student_eu"]) & valid
+                                        metrics["teacher/eu_no_finite_trajectory_count"] = float(
+                                            (~finite_eu.any(dim=-1)).sum().item()
+                                        )
+                                    metrics["teacher/routing_temperature"] = float(
+                                        batch.meta_info["teacher_selection_tau"]
+                                    )
+                                    metrics["teacher/eu_coefficient_gain"] = float(
+                                        batch.meta_info["teacher_eu_coefficient_gain"]
+                                    )
+                                    metrics["teacher/eu_normalized_center"] = float(
+                                        batch.meta_info["teacher_eu_normalized_center"]
+                                    )
+                                    metrics["teacher/eu_coefficient_min"] = float(
+                                        batch.meta_info["teacher_eu_coefficient_min"]
+                                    )
+                                    metrics["teacher/eu_coefficient_max"] = float(
+                                        batch.meta_info["teacher_eu_coefficient_max"]
+                                    )
                                     entropy = -(weights * weights.clamp_min(1e-30).log()).sum(-1)
                                     if valid.any():
                                         metrics["teacher/weight_entropy"] = entropy[valid].mean().item()
@@ -2352,7 +2457,18 @@ class RayPPOTrainer:
                         "dynamic_teacher_learnability",
                         "dynamic_teacher_js",
                         "dynamic_teacher_utility",
+                        "dynamic_teacher_log_routing_score",
                         "dynamic_teacher_weight",
+                        "dynamic_teacher_centered_log_learnability",
+                        "dynamic_teacher_centered_log_novelty",
+                        "dynamic_teacher_normalized_log_learnability",
+                        "dynamic_teacher_normalized_log_novelty",
+                        "dynamic_teacher_learnability_scale",
+                        "dynamic_teacher_novelty_scale",
+                        "dynamic_teacher_semantic_high_eu_rate",
+                        "dynamic_teacher_eu_normalized_uncertainty",
+                        "dynamic_teacher_learnability_coefficient",
+                        "dynamic_teacher_novelty_coefficient",
                         "teacher_on_student_log_probs",
                         "teacher_on_student_log_probs_by_teacher",
                         "teacher_top_k_ids",
@@ -2365,6 +2481,8 @@ class RayPPOTrainer:
                         "student_log_probs_on_teacher_ids",
                         "teacher_reward_sums",
                         "teacher_reward_counts",
+                        "student_eu",
+                        "semantic_token_mask",
                     ]
                     for key in keys_to_pop:
                         if key in batch.batch.keys():

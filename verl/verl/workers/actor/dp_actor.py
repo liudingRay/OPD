@@ -30,8 +30,9 @@ from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_id, get_device_name
+from verl.utils.epistemic_uncertainty import compute_token_level_eu
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
-from verl.utils.multi_teacher import compute_weighted_teacher_rewards, trajectory_ln_weights
+from verl.utils.multi_teacher import compute_weighted_teacher_rewards, trajectory_eu_ln_weights, trajectory_ln_weights
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
@@ -85,14 +86,15 @@ class DataParallelPPOActor(BasePPOActor):
         self.device_name = get_device_name()
 
     def _forward_micro_batch(
-        self, micro_batch, temperature, calculate_entropy=False, top_k=0, student_top_k_ids=None
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        self, micro_batch, temperature, calculate_entropy=False, top_k=0, student_top_k_ids=None, compute_eu=False
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns:
             entropy: # (bs, response_len)
             log_probs: # (bs, response_len)
             topk_ids: # (bs, response_len, k)
             topk_log_probs: # (bs, response_len, k)
+            student_eu: # (bs, response_len), from raw pre-temperature logits
         """
         response_length = micro_batch["responses"].size(-1)
         multi_modal_inputs = {}
@@ -109,6 +111,7 @@ class DataParallelPPOActor(BasePPOActor):
             entropy = None
             topk_ids = None
             topk_log_probs = None
+            student_eu = None
             
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 4, seqlen) -> (4, bsz, seqlen)
@@ -182,7 +185,7 @@ class DataParallelPPOActor(BasePPOActor):
                     **extra_args,
                 )  # prevent model thinks we are generating
                 
-                need_logits = top_k > 0
+                need_logits = top_k > 0 or compute_eu
 
                 if self.use_fused_kernels and not need_logits:
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
@@ -190,6 +193,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                 else:
                     logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
+                    student_eu_rmpad = compute_token_level_eu(logits_rmpad) if compute_eu else None
                     logits_rmpad.div_(temperature)
 
                     # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
@@ -300,6 +304,13 @@ class DataParallelPPOActor(BasePPOActor):
                             unpad_dim=0,
                             padding_size=pad_size,
                          )
+                    if compute_eu:
+                        student_eu_rmpad = gather_outputs_and_unpad(
+                            student_eu_rmpad,
+                            gather_dim=0,
+                            unpad_dim=0,
+                            padding_size=pad_size,
+                        )
                 # pad back to (bsz, seqlen)
                 if calculate_entropy:
                     full_entropy = pad_input(
@@ -314,6 +325,13 @@ class DataParallelPPOActor(BasePPOActor):
                     batch=batch_size,
                     seqlen=seqlen,
                 )
+                if compute_eu:
+                    full_student_eu = pad_input(
+                        hidden_states=student_eu_rmpad.unsqueeze(-1),
+                        indices=indices,
+                        batch=batch_size,
+                        seqlen=seqlen,
+                    )
                 
                 if top_k > 0:
                     full_topk_ids = pad_input(
@@ -333,6 +351,8 @@ class DataParallelPPOActor(BasePPOActor):
                 if calculate_entropy:
                     entropy = full_entropy.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
                 log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
+                if compute_eu:
+                    student_eu = full_student_eu.squeeze(-1)[:, -response_length - 1 : -1]
                 
                 if top_k > 0:
                     topk_ids = full_topk_ids[:, -response_length - 1 : -1, :]
@@ -353,16 +373,16 @@ class DataParallelPPOActor(BasePPOActor):
                     **extra_args,
                 )  # prevent model thinks we are generating
                 
-                need_logits = top_k > 0
+                need_logits = top_k > 0 or compute_eu
                 if self.use_fused_kernels and not need_logits:
                     log_probs = output.log_probs[:, -response_length - 1 : -1]
                     entropy = output.entropy[:, -response_length - 1 : -1]  # (bsz, response_length)
 
                 else:
-                    logits = output.logits
-
+                    logits = output.logits[:, -response_length - 1 : -1, :]
+                    if compute_eu:
+                        student_eu = compute_token_level_eu(logits)
                     logits.div_(temperature)
-                    logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
                     
                     # Optimization: when top_k > 0, compute log_softmax once and gather both
                     # log_probs and topk_log_probs to avoid duplicate computation
@@ -393,7 +413,7 @@ class DataParallelPPOActor(BasePPOActor):
                         # Use pre-computed log_probs_all (always available when need_topk=True)
                         topk_log_probs = log_probs_all.gather(dim=-1, index=topk_ids)
 
-            return entropy, log_probs, topk_ids, topk_log_probs
+            return entropy, log_probs, topk_ids, topk_log_probs, student_eu
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def compute_log_probs_for_ids(self, data: DataProto) -> torch.Tensor:
@@ -433,7 +453,7 @@ class DataParallelPPOActor(BasePPOActor):
             mb_target_ids = model_inputs["target_ids"]
             with torch.no_grad():
                 # We reuse _forward_micro_batch. It returns (entropy, log_probs, topk_ids, topk_log_probs)
-                _, _, _, topk_log_probs = self._forward_micro_batch(
+                _, _, _, topk_log_probs, _ = self._forward_micro_batch(
                     model_inputs, temperature=temperature, calculate_entropy=False, 
                     top_k=top_k, student_top_k_ids=mb_target_ids
                 )
@@ -496,7 +516,7 @@ class DataParallelPPOActor(BasePPOActor):
                 model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
                 mb_target_ids = model_inputs["teacher_top_k_ids"]
                 with torch.no_grad():
-                    _, _, _, topk_log_probs = self._forward_micro_batch(
+                    _, _, _, topk_log_probs, _ = self._forward_micro_batch(
                         model_inputs, temperature=temperature, calculate_entropy=False, 
                         top_k=top_k, student_top_k_ids=mb_target_ids
                     )
@@ -573,14 +593,34 @@ class DataParallelPPOActor(BasePPOActor):
                     raise ValueError("teacher_weights is required for multi-teacher distillation")
 
                 mode = data.meta_info.get("teacher_weight_mode", "fixed")
-                if mode == "ln_softmax":
-                    dynamic_weights, diagnostics = trajectory_ln_weights(
-                        S_logp, T_on_S_by_teacher,
+                if mode in ("ln_softmax", "eu_ln_softmax"):
+                    routing_args = (
+                        S_logp,
+                        T_on_S_by_teacher,
                         data.batch["teacher_overlap_mask_by_teacher"].to(device),
                         data.batch["response_mask"].to(device),
-                        beta=data.meta_info["teacher_ema_beta"],
-                        tau=data.meta_info["teacher_selection_tau"],
                     )
+                    routing_kwargs = {
+                        "beta": data.meta_info["teacher_ema_beta"],
+                        "tau": data.meta_info["teacher_selection_tau"],
+                    }
+                    if mode == "eu_ln_softmax":
+                        for key in ("student_eu", "semantic_token_mask"):
+                            if key not in data.batch:
+                                raise ValueError(f"{key} is required for EU-controlled teacher routing")
+                        dynamic_weights, diagnostics = trajectory_eu_ln_weights(
+                            *routing_args,
+                            data.batch["student_eu"].to(device),
+                            data.batch["semantic_token_mask"].to(device),
+                            coefficient_gain=data.meta_info.get("teacher_eu_coefficient_gain", 15.0),
+                            normalized_center=data.meta_info.get("teacher_eu_normalized_center", 0.25),
+                            coefficient_min=data.meta_info.get("teacher_eu_coefficient_min", 0.1),
+                            coefficient_max=data.meta_info.get("teacher_eu_coefficient_max", 1.9),
+                            synchronize_stats=True,
+                            **routing_kwargs,
+                        )
+                    else:
+                        dynamic_weights, diagnostics = trajectory_ln_weights(*routing_args, **routing_kwargs)
                     teacher_weights = dynamic_weights.unsqueeze(-2)
                     # Padding must not inject NaNs into reward summaries or advantages.
                     response_valid = data.batch["response_mask"].to(device).bool()
@@ -730,18 +770,24 @@ class DataParallelPPOActor(BasePPOActor):
             micro_batches = data.split(micro_batch_size)
 
         top_k = data.meta_info.get("top_k", 0)
+        compute_eu = data.meta_info.get("compute_student_eu", False)
         print(f"In compute_log_prob, top_k: {top_k}")
         log_probs_lst = []
         entropy_lst = []
         topk_ids_lst = []
         topk_log_probs_lst = []
+        student_eu_lst = []
 
         for micro_batch in micro_batches:
             micro_batch = micro_batch.to(get_device_id())
             model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
-                entropy, log_probs, topk_ids, topk_log_probs = self._forward_micro_batch(
-                    model_inputs, temperature=temperature, calculate_entropy=calculate_entropy, top_k=top_k
+                entropy, log_probs, topk_ids, topk_log_probs, student_eu = self._forward_micro_batch(
+                    model_inputs,
+                    temperature=temperature,
+                    calculate_entropy=calculate_entropy,
+                    top_k=top_k,
+                    compute_eu=compute_eu,
                 )
             # Keep on GPU to avoid expensive CPU-GPU transfer for large top-k
             # log_probs = log_probs.to("cpu")
@@ -754,6 +800,8 @@ class DataParallelPPOActor(BasePPOActor):
                 # topk_log_probs = topk_log_probs.to("cpu")
                 topk_ids_lst.append(topk_ids)
                 topk_log_probs_lst.append(topk_log_probs)
+            if compute_eu:
+                student_eu_lst.append(student_eu)
 
         log_probs = torch.concat(log_probs_lst, dim=0)
         entropys = None
@@ -765,6 +813,7 @@ class DataParallelPPOActor(BasePPOActor):
         if top_k > 0:
             topk_ids_tensor = torch.concat(topk_ids_lst, dim=0)
             topk_log_probs_tensor = torch.concat(topk_log_probs_lst, dim=0)
+        student_eu_tensor = torch.concat(student_eu_lst, dim=0) if compute_eu else None
 
         if use_dynamic_bsz:
             log_probs = restore_dynamic_batch(log_probs, batch_idx_list)
@@ -773,8 +822,10 @@ class DataParallelPPOActor(BasePPOActor):
             if top_k > 0:
                 topk_ids_tensor = restore_dynamic_batch(topk_ids_tensor, batch_idx_list)
                 topk_log_probs_tensor = restore_dynamic_batch(topk_log_probs_tensor, batch_idx_list)
+            if compute_eu:
+                student_eu_tensor = restore_dynamic_batch(student_eu_tensor, batch_idx_list)
 
-        return log_probs, entropys, topk_ids_tensor, topk_log_probs_tensor
+        return log_probs, entropys, topk_ids_tensor, topk_log_probs_tensor, student_eu_tensor
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
@@ -882,7 +933,7 @@ class DataParallelPPOActor(BasePPOActor):
                         elif "student_top_k_ids" in model_inputs:
                             student_top_k_ids = model_inputs["student_top_k_ids"]
 
-                        entropy, _, _, topk_log_probs = self._forward_micro_batch(
+                        entropy, _, _, topk_log_probs, _ = self._forward_micro_batch(
                             model_inputs, temperature=temperature, calculate_entropy=calculate_entropy,
                             top_k=top_k, student_top_k_ids=student_top_k_ids
                         )

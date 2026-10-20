@@ -164,7 +164,7 @@ class TestDataParallelPPOActor(unittest.TestCase):
         """Test compute_log_prob method"""
         data = self._create_test_data_for_compute_log_prob()
 
-        log_probs, entropies = self.actor.compute_log_prob(data, calculate_entropy=True)
+        log_probs, entropies, *_ = self.actor.compute_log_prob(data, calculate_entropy=True)
 
         batch_size = data.batch["responses"].shape[0]
         response_length = data.batch["responses"].shape[1]
@@ -182,7 +182,7 @@ class TestDataParallelPPOActor(unittest.TestCase):
         """Test compute_log_prob method without entropy calculation"""
         data = self._create_test_data_for_compute_log_prob()
 
-        log_probs, entropies = self.actor.compute_log_prob(data, calculate_entropy=False)
+        log_probs, entropies, *_ = self.actor.compute_log_prob(data, calculate_entropy=False)
 
         batch_size = data.batch["responses"].shape[0]
         response_length = data.batch["responses"].shape[1]
@@ -249,7 +249,7 @@ class TestDataParallelPPOActor(unittest.TestCase):
         qwen_actor = DataParallelPPOActor(config=self.config, actor_module=qwen_model, actor_optimizer=qwen_optimizer)
 
         data = self._create_test_data_for_compute_log_prob()
-        log_probs, entropies = qwen_actor.compute_log_prob(data, calculate_entropy=True)
+        log_probs, entropies, *_ = qwen_actor.compute_log_prob(data, calculate_entropy=True)
 
         batch_size = data.batch["responses"].shape[0]
         response_length = data.batch["responses"].shape[1]

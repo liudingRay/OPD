@@ -983,7 +983,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             with adapter_ctx:
-                output, entropys, topk_ids, topk_log_probs = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+                output, entropys, topk_ids, topk_log_probs, student_eu = self.actor.compute_log_prob(
+                    data=data, calculate_entropy=True
+                )
             
             tensors = {"old_log_probs": output, "entropys": entropys}
             if topk_ids is not None:
@@ -991,6 +993,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if topk_log_probs is not None:
                 tensors["student_top_k_log_probs"] = topk_log_probs
                 tensors["student_valid_counts"] = (topk_log_probs > -1e6).sum(dim=-1)
+            if student_eu is not None:
+                tensors["student_eu"] = student_eu
             
             output = DataProto.from_dict(
                 tensors=tensors,
@@ -1096,7 +1100,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data.meta_info["top_k"] = 0
         with self.ulysses_sharding_manager:
             data = data.to("cpu")  # data will to device with each micro batch on ref.compute_log_prob
-            output, _, _, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
+            output, *_ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
             output = DataProto.from_dict(tensors={"ref_log_prob": output})
 
         output = output.to("cpu")
@@ -2039,7 +2043,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                 # pad and slice the inputs if sp > 1
                 if self.use_ulysses_sp:
                     is_vlm_model = hasattr(
-                        getattr(self.actor_module, "module", self.actor_module).config, "vision_config"
+                        getattr(reward_module, "module", reward_module).config, "vision_config"
                     )
                     if is_vlm_model:
                         # vlm model's inputs will be sliced after embedding
@@ -2115,10 +2119,11 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                          # slice it if sp
                          if self.use_ulysses_sp:
                              local_top_k_ids, _, _ = ulysses_pad_and_slice_inputs(
-                                 packed_top_k_ids,
+                                 packed_top_k_ids.transpose(0, 1),
                                  position_ids_rmpad=None,
                                  sp_size=self.ulysses_sequence_parallel_size,
                              )
+                             local_top_k_ids = local_top_k_ids.transpose(0, 1)
                          else:
                              local_top_k_ids = packed_top_k_ids
 
@@ -2140,145 +2145,29 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                     else:
                          pass
 
-                # pad it back
-                if self.use_ulysses_sp:
-                    full_log_probs = gather_outputs_and_unpad(
-                        local_hidden_states=rm_log_probs.unsqueeze(-1),
-                        indices=indices,
-                        batch=batch_size,
-                        seqlen=seqlen,
-                        sp_size=self.ulysses_sequence_parallel_size,
-                        group=self.ulysses_sequence_parallel_group
-                    )
-                    if local_top_k_log_probs_on_student_ids is not None:
-                        full_top_k_log_probs_on_student_ids = gather_outputs_and_unpad(
-                            local_hidden_states=local_top_k_log_probs_on_student_ids,
-                            indices=indices,
-                            batch=batch_size,
-                            seqlen=seqlen,
-                            sp_size=self.ulysses_sequence_parallel_size,
-                            group=self.ulysses_sequence_parallel_group
+                # Restore every diagnostic with the same packing/SP map as reward.
+                def restore_positions(values):
+                    if self.use_ulysses_sp:
+                        values = gather_outputs_and_unpad(
+                            values, gather_dim=0, unpad_dim=0, padding_size=pad_size,
                         )
-                    if local_teacher_top_k_ids is not None:
-                         full_teacher_top_k_ids = gather_outputs_and_unpad(
-                            local_hidden_states=local_teacher_top_k_ids,
-                            indices=indices,
-                            batch=batch_size,
-                            seqlen=seqlen,
-                            sp_size=self.ulysses_sequence_parallel_size,
-                            group=self.ulysses_sequence_parallel_group
-                         )
-                    if local_teacher_top_k_log_probs is not None:
-                         full_teacher_top_k_log_probs = gather_outputs_and_unpad(
-                            local_hidden_states=local_teacher_top_k_log_probs,
-                            indices=indices,
-                            batch=batch_size,
-                            seqlen=seqlen,
-                            sp_size=self.ulysses_sequence_parallel_size,
-                            group=self.ulysses_sequence_parallel_group
-                         )
-                    if local_valid_counts is not None:
-                        full_valid_counts = gather_outputs_and_unpad(
-                            local_hidden_states=local_valid_counts.unsqueeze(-1),
-                            indices=indices,
-                            batch=batch_size,
-                            seqlen=seqlen,
-                            sp_size=self.ulysses_sequence_parallel_size,
-                            group=self.ulysses_sequence_parallel_group
-                        )
-                    if local_overlap_mask is not None:
-                        full_overlap_mask = gather_outputs_and_unpad(
-                            local_hidden_states=local_overlap_mask.unsqueeze(-1), # Mask is already 1D per token? No, mask is (NNZ, K), wait.
-                            # compute_teacher_top_k_log_probs return cat(results)
-                            # results is (chunk, K_s). So local_overlap_mask is (NNZ, K_s).
-                            indices=indices,
-                            batch=batch_size,
-                            seqlen=seqlen,
-                            sp_size=self.ulysses_sequence_parallel_size,
-                            group=self.ulysses_sequence_parallel_group
-                        )
-                    if local_teacher_in_student_mask is not None:
-                        full_teacher_in_student_mask = gather_outputs_and_unpad(
-                            local_hidden_states=local_teacher_in_student_mask,
-                            indices=indices,
-                            batch=batch_size,
-                            seqlen=seqlen,
-                            sp_size=self.ulysses_sequence_parallel_size,
-                            group=self.ulysses_sequence_parallel_group
-                        )
-                    if local_entropy_rmpad is not None:
-                        full_entropy = gather_outputs_and_unpad(
-                            local_hidden_states=local_entropy_rmpad.unsqueeze(-1),
-                            indices=indices,
-                            batch=batch_size,
-                            seqlen=seqlen,
-                            sp_size=self.ulysses_sequence_parallel_size,
-                            group=self.ulysses_sequence_parallel_group
-                        )
-                else:
-                    full_log_probs = pad_input(
-                        hidden_states=rm_log_probs.unsqueeze(-1),
-                        indices=indices,
-                        batch=batch_size,
-                        seqlen=seqlen,
-                    )
-                    if local_top_k_log_probs_on_student_ids is not None:
-                        full_top_k_log_probs_on_student_ids = pad_input(
-                            hidden_states=local_top_k_log_probs_on_student_ids,
-                            indices=indices,
-                            batch=batch_size,
-                            seqlen=seqlen,
-                        )
-                    if local_teacher_top_k_ids is not None:
-                        full_teacher_top_k_ids = pad_input(
-                            hidden_states=local_teacher_top_k_ids,
-                            indices=indices,
-                            batch=batch_size,
-                            seqlen=seqlen,
-                        )
-                    if local_teacher_top_k_log_probs is not None:
-                        full_teacher_top_k_log_probs = pad_input(
-                            hidden_states=local_teacher_top_k_log_probs,
-                            indices=indices,
-                            batch=batch_size,
-                            seqlen=seqlen,
-                        )
-                    if local_valid_counts is not None:
-                        full_valid_counts = pad_input(
-                            hidden_states=local_valid_counts.unsqueeze(-1),
-                            indices=indices,
-                            batch=batch_size,
-                            seqlen=seqlen,
-                        )
-                    if local_overlap_mask is not None:
-                        # local_overlap_mask is (NNZ, K_s)
-                        # pad_input expects (NNZ, Hidden). K_s is "Hidden".
-                        # So we don't unsqueeze if K_s > 1. 
-                        # But wait, logic suggests unsqueeze(-1) for scalar? 
-                        # Previous code: local_overlap_counts was (NNZ,), so unsqueeze(-1) -> (NNZ, 1).
-                        # varying K? "strategy=only_stu" -> K_s.
-                        # If K_s > 1, no unsqueeze.
-                        # pad_input pads dim 0.
-                        full_overlap_mask = pad_input(
-                            hidden_states=local_overlap_mask, 
-                            indices=indices,
-                            batch=batch_size,
-                            seqlen=seqlen,
-                        )
-                    if local_teacher_in_student_mask is not None:
-                        full_teacher_in_student_mask = pad_input(
-                            hidden_states=local_teacher_in_student_mask,
-                            indices=indices,
-                            batch=batch_size,
-                            seqlen=seqlen,
-                        )
-                    if local_entropy_rmpad is not None:
-                        full_entropy = pad_input(
-                            hidden_states=local_entropy_rmpad.unsqueeze(-1),
-                            indices=indices,
-                            batch=batch_size,
-                            seqlen=seqlen,
-                        )
+                    return pad_input(values, indices=indices, batch=batch_size, seqlen=seqlen)
+
+                full_log_probs = restore_positions(rm_log_probs.unsqueeze(-1))
+                if local_top_k_log_probs_on_student_ids is not None:
+                    full_top_k_log_probs_on_student_ids = restore_positions(local_top_k_log_probs_on_student_ids)
+                if local_teacher_top_k_ids is not None:
+                    full_teacher_top_k_ids = restore_positions(local_teacher_top_k_ids)
+                if local_teacher_top_k_log_probs is not None:
+                    full_teacher_top_k_log_probs = restore_positions(local_teacher_top_k_log_probs)
+                if local_valid_counts is not None:
+                    full_valid_counts = restore_positions(local_valid_counts.unsqueeze(-1))
+                if local_overlap_mask is not None:
+                    full_overlap_mask = restore_positions(local_overlap_mask)
+                if local_teacher_in_student_mask is not None:
+                    full_teacher_in_student_mask = restore_positions(local_teacher_in_student_mask)
+                if local_entropy_rmpad is not None:
+                    full_entropy = restore_positions(local_entropy_rmpad.unsqueeze(-1))
 
                 rm_log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
                 if local_top_k_log_probs_on_student_ids is not None:
@@ -2358,7 +2247,10 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                             teacher_on_student_log_probs = teacher_on_student_log_probs - teacher_logsumexp
                             teacher_overlap_mask = None
 
-            return rm_log_probs, teacher_on_student_log_probs, teacher_top_k_ids, teacher_top_k_log_probs, teacher_entropy, teacher_valid_counts, teacher_overlap_mask, teacher_in_student_mask
+            return (
+                rm_log_probs, teacher_on_student_log_probs, teacher_top_k_ids, teacher_top_k_log_probs,
+                teacher_entropy, teacher_valid_counts, teacher_overlap_mask, teacher_in_student_mask,
+            )
 
     def _expand_to_token_level(self, data: DataProto, scores: torch.Tensor):
         batch_size = data.batch.batch_size[0]
@@ -2649,6 +2541,22 @@ class RewardModelWorker(Worker, DistProfilerExtension):
 
         # Support all hardwares
         rm_data = rm_data.to(get_device_id())
+        # Reuse the actor loss mask; do not infer validity from attention alone.
+        response_mask = data.batch["response_mask"]
+        if response_mask.shape != data.batch["responses"].shape:
+            raise ValueError("response_mask and response tokens must align")
+        valid = response_mask.bool()
+        response_length = response_mask.shape[-1]
+        if (
+            rm_data.batch["responses"].shape != response_mask.shape
+            or not torch.equal(rm_data.batch["responses"][valid], data.batch["responses"][valid])
+            or not torch.equal(
+                rm_data.batch["input_ids"][:, -response_length:][valid], data.batch["responses"][valid]
+            )
+        ):
+            raise ValueError("Teacher input must preserve the exact student response tokens for reward alignment")
+        rm_data.batch["response_mask"] = response_mask
+
         
         if student_top_k_ids is not None:
             rm_data.batch["student_top_k_ids"] = student_top_k_ids
