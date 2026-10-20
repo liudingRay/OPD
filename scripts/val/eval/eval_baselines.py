@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the OPD/JustRL math evaluation protocol for several local baselines.
+"""Run the OPD/JustRL evaluation protocol for several local baselines.
 
 Each model is assigned to one GPU. The default registry evaluates the Qwen3
 1.7B-Base and 8B-Base models in ``<project>/model`` used by the Leonardo batch
@@ -19,17 +19,14 @@ import traceback
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-import pandas as pd
-from tqdm import tqdm
-from vllm import LLM, SamplingParams
-
-
 PROMPT_TEMPLATE = "{problem} Please reason step by step, and put your final answer within \\boxed{{}}."
 DEFAULT_MODELS = (
     "Qwen3-1.7B-Base",
     "Qwen3-8B-Base",
 )
 DEFAULT_TASKS = ("AIME24", "AIME25", "AMC23")
+MULTIPLE_CHOICE_TASKS = frozenset({"GPQA", "MMLU-Pro"})
+SUPPORTED_TASKS = (*DEFAULT_TASKS, "MATH-500", *sorted(MULTIPLE_CHOICE_TASKS))
 
 
 @dataclass(frozen=True)
@@ -40,6 +37,7 @@ class EvalConfig:
     data_dir: str
     output_root: str
     tasks: tuple[str, ...]
+    max_examples: int | None
     num_samples: int
     temperature: float
     top_p: float
@@ -61,8 +59,17 @@ def parse_model_spec(value: str) -> tuple[str, str]:
     return label, path
 
 
-def load_samples(filepath: Path) -> list[dict[str, object]]:
+def build_user_prompt(task_name: str, question: str) -> str:
+    """Preserve the benchmark-provided prompt for multiple-choice tasks."""
+    if task_name in MULTIPLE_CHOICE_TASKS:
+        return question
+    return PROMPT_TEMPLATE.format(problem=question)
+
+
+def load_samples(filepath: Path, max_examples: int | None = None) -> list[dict[str, object]]:
     """Load one benchmark in the same format as the authors' generator."""
+    import pandas as pd
+
     df = pd.read_parquet(filepath)
     samples = [
         {
@@ -72,6 +79,10 @@ def load_samples(filepath: Path) -> list[dict[str, object]]:
         }
         for index in range(len(df))
     ]
+    if max_examples is not None:
+        if max_examples > len(samples):
+            raise ValueError(f"Requested {max_examples} examples from {filepath}, but it contains only {len(samples)}.")
+        samples = samples[:max_examples]
     print(f"Loaded {len(samples)} unique samples from {filepath}", flush=True)
     return samples
 
@@ -100,6 +111,9 @@ def output_path(config: EvalConfig, task_name: str) -> Path:
 
 def run_model(config: EvalConfig) -> dict[str, object]:
     """Evaluate one model on one GPU and return a compact completion record."""
+    from tqdm import tqdm
+    from vllm import LLM, SamplingParams
+
     os.environ["CUDA_VISIBLE_DEVICES"] = config.gpu_id
     validate_config(config)
 
@@ -131,15 +145,16 @@ def run_model(config: EvalConfig) -> dict[str, object]:
                 completed_tasks.append(task_name)
                 continue
 
-            samples = load_samples(Path(config.data_dir) / task_name / "test.parquet")
+            samples = load_samples(Path(config.data_dir) / task_name / "test.parquet", config.max_examples)
+            user_prompts = [build_user_prompt(task_name, str(sample["question"])) for sample in samples]
             prompts = [
                 tokenizer.apply_chat_template(
-                    [{"role": "user", "content": PROMPT_TEMPLATE.format(problem=sample["question"])}],
+                    [{"role": "user", "content": user_prompt}],
                     tokenize=False,
                     add_generation_prompt=True,
                     enable_thinking=config.enable_thinking,
                 )
-                for sample in samples
+                for user_prompt in user_prompts
             ]
             results = []
             for rollout_id in tqdm(
@@ -159,12 +174,12 @@ def run_model(config: EvalConfig) -> dict[str, object]:
                     seed=rollout_seed,
                 )
                 outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
-                for sample, output in zip(samples, outputs, strict=True):
+                for sample, user_prompt, output in zip(samples, user_prompts, outputs, strict=True):
                     results.append(
                         {
                             "example_id": sample["example_id"],
                             "question": sample["question"],
-                            "prompt": PROMPT_TEMPLATE.format(problem=sample["question"]),
+                            "prompt": user_prompt,
                             "answer": sample["answer"],
                             "seed": rollout_seed,
                             "response": output.outputs[0].text,
@@ -209,7 +224,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Evaluate all models sequentially on the single GPU specified by --gpu-ids.",
     )
-    parser.add_argument("--tasks", nargs="+", choices=DEFAULT_TASKS, default=list(DEFAULT_TASKS))
+    parser.add_argument("--tasks", nargs="+", choices=SUPPORTED_TASKS, default=list(DEFAULT_TASKS))
+    parser.add_argument("--max-examples", type=int, default=None, help="Optional leading subset for smoke tests.")
     parser.add_argument("--num-samples", type=int, default=16)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.8)
@@ -226,6 +242,8 @@ def main() -> None:
     args = parse_args()
     if args.num_samples <= 0:
         raise ValueError("--num-samples must be positive.")
+    if args.max_examples is not None and args.max_examples <= 0:
+        raise ValueError("--max-examples must be positive when provided.")
     if args.seed < 0:
         raise ValueError("--seed must be non-negative.")
     gpu_ids = [gpu_id.strip() for gpu_id in args.gpu_ids.split(",") if gpu_id.strip()]
@@ -250,6 +268,7 @@ def main() -> None:
             data_dir=str(args.data_dir.resolve()),
             output_root=str(args.output_root.resolve()),
             tasks=tuple(args.tasks),
+            max_examples=args.max_examples,
             num_samples=args.num_samples,
             temperature=args.temperature,
             top_p=args.top_p,

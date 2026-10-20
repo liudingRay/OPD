@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Submit the Leonardo GPQA Diamond protocol on one A100.
+#
+# Formal protocol: non-thinking avg@8 with the reusable AIME evaluator's
+# temperature, top-p, top-k, min-p, response budget, and base seed.
+# SMOKE=1 evaluates one question with eight samples in an isolated output root.
+#
+# Usage on a Leonardo login node:
+#   MODEL_NAME=... MODEL_PATH=/absolute/model/path \
+#     bash leonardo/eval-gpqa-qwen3-model-1xa100
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+PROJECT_DIR=${PROJECT_DIR:-/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD}
+DATA_DIR=${DATA_DIR:-$PROJECT_DIR/datasets/test_data}
+LOG_DIR=${LOG_DIR:-$PROJECT_DIR/logs}
+
+if [[ -z ${MODEL_NAME:-} || -z ${MODEL_PATH:-} ]]; then
+    echo "Set both MODEL_NAME and the absolute MODEL_PATH for the model to evaluate." >&2
+    exit 2
+fi
+if [[ "$MODEL_PATH" != /* ]]; then
+    echo "MODEL_PATH must be absolute; got: $MODEL_PATH" >&2
+    exit 2
+fi
+
+require_file() {
+    if [[ ! -f "$1" ]]; then
+        echo "Required file is missing: $1" >&2
+        exit 1
+    fi
+}
+
+require_dir() {
+    if [[ ! -d "$1" ]]; then
+        echo "Required directory is missing: $1" >&2
+        exit 1
+    fi
+}
+
+require_dir "$PROJECT_DIR"
+require_dir "$MODEL_PATH"
+require_file "$MODEL_PATH/config.json"
+if ! compgen -G "$MODEL_PATH/model*.safetensors" >/dev/null; then
+    echo "Hugging Face model weights are missing from: $MODEL_PATH" >&2
+    exit 1
+fi
+require_file "$DATA_DIR/GPQA/test.parquet"
+require_file "$PROJECT_DIR/scripts/val/eval/eval_baselines.py"
+require_file "$PROJECT_DIR/scripts/val/eval/grade.py"
+require_file "$PROJECT_DIR/scripts/val/eval/summarize_baseline_results.py"
+
+export PROJECT_DIR
+export DATA_DIR
+export ENABLE_THINKING=0
+export TASKS=GPQA
+export NUM_SAMPLES=8
+
+case "${SMOKE:-0}" in
+    0)
+        export MAX_EXAMPLES=
+        SCOPE_LABEL=
+        ;;
+    1)
+        export MAX_EXAMPLES=1
+        SCOPE_LABEL=-smoke1
+        export EVAL_JOB_NAME=${EVAL_JOB_NAME:-eval-gpqa-smoke}
+        export EVAL_TIME_LIMIT=${EVAL_TIME_LIMIT:-01:00:00}
+        ;;
+    *)
+        echo "SMOKE must be 0 or 1; got: $SMOKE" >&2
+        exit 2
+        ;;
+esac
+
+export TEMPERATURE=0.7
+export TOP_P=0.8
+export TOP_K=20
+export MIN_P=0.0
+export MAX_TOKENS=38912
+export SEED=0
+export EVAL_JOB_NAME=${EVAL_JOB_NAME:-eval-gpqa}
+export EVAL_TIME_LIMIT=${EVAL_TIME_LIMIT:-24:00:00}
+export EVAL_PROTOCOL_LABEL=${EVAL_PROTOCOL_LABEL:-gpqa${SCOPE_LABEL}-t${TEMPERATURE}-p${TOP_P}-topk${TOP_K}-minp${MIN_P}-mnt${MAX_TOKENS}}
+
+DRY_RUN=${DRY_RUN:-0}
+case "$DRY_RUN" in
+    0|1) ;;
+    *)
+        echo "DRY_RUN must be 0 or 1; got: $DRY_RUN" >&2
+        exit 2
+        ;;
+esac
+if [[ "$DRY_RUN" == 1 ]]; then
+    echo "Leonardo GPQA configuration"
+    echo "  model name:  $MODEL_NAME"
+    echo "  model path:  $MODEL_PATH"
+    echo "  output root: ${EVAL_OUTPUT_ROOT:-$PROJECT_DIR/scripts/val/eval/justrl_eval_outputs/$MODEL_NAME-nonthinking-$EVAL_PROTOCOL_LABEL-n$NUM_SAMPLES}"
+    echo "  samples:     $NUM_SAMPLES"
+    echo "  max examples: ${MAX_EXAMPLES:-all}"
+    echo "DRY_RUN=1: no Slurm job was submitted."
+    exit 0
+fi
+
+mkdir -p "$LOG_DIR"
+export EVAL_JOB_NAME EVAL_TIME_LIMIT EVAL_PROTOCOL_LABEL LOG_DIR
+exec sbatch \
+    --job-name="$EVAL_JOB_NAME" \
+    --time="$EVAL_TIME_LIMIT" \
+    --export=ALL \
+    --output="$LOG_DIR/%x-%j.out" \
+    --error="$LOG_DIR/%x-%j.err" \
+    "$SCRIPT_DIR/submit_eval_qwen3_model_1xa100.sbatch"
