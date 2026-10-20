@@ -180,6 +180,7 @@ export HF_HUB_CACHE=${HF_HUB_CACHE:-$HF_HOME/hub}
 export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-$OPD_CACHE_ROOT/triton}
 export TORCHINDUCTOR_CACHE_DIR=${TORCHINDUCTOR_CACHE_DIR:-$OPD_CACHE_ROOT/torchinductor}
 export OUTLINES_CACHE_DIR=${OUTLINES_CACHE_DIR:-$OPD_CACHE_ROOT/outlines/ifeval-$MODEL_NAME-$SLURM_JOB_ID}
+export VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT:-$OPD_CACHE_ROOT/vllm/$SLURM_JOB_ID}
 export TMPDIR=${TMPDIR:-$OPD_CACHE_ROOT/tmp/ifeval-$SLURM_JOB_ID}
 export NLTK_DATA
 export PYTHONUNBUFFERED=1
@@ -194,6 +195,7 @@ mkdir -p \
     "$TRITON_CACHE_DIR" \
     "$TORCHINDUCTOR_CACHE_DIR" \
     "$OUTLINES_CACHE_DIR" \
+    "$VLLM_CACHE_ROOT" \
     "$TMPDIR"
 
 python --version
@@ -203,6 +205,7 @@ python -m pip check
     python -c "import grade_ifeval; grade_ifeval.validate_scorer_environment()"
 )
 nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu --format=csv,noheader
+echo "vLLM cache: $VLLM_CACHE_ROOT"
 
 EVAL_ARGS=(
     --model-name "$MODEL_NAME"

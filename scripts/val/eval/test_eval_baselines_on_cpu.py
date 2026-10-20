@@ -94,6 +94,21 @@ class EvalBaselinePromptTest(unittest.TestCase):
         shared_launcher = (leonardo_dir / "submit_eval_qwen3_model_1xa100.sbatch").read_text(encoding="utf-8")
         self.assertIn("#SBATCH --account=AIFAC_S07_051", shared_launcher)
 
+    def test_leonardo_vllm_evaluations_use_project_cache(self) -> None:
+        leonardo_dir = self.project_root / "leonardo"
+        launchers = (
+            "eval-ifeval-qwen3-model-1xa100",
+            "submit_eval_qwen3_model_1xa100.sbatch",
+            "submit_eval_qwen3_thinking_baselines_1xa100.sbatch",
+            "submit_eval_qwen3_1p7b_opd_1xa100.sbatch",
+            "submit_eval_qwen3_14b_task_2xa100.sbatch",
+        )
+        for filename in launchers:
+            launcher = (leonardo_dir / filename).read_text(encoding="utf-8")
+            with self.subTest(launcher=filename):
+                self.assertIn("VLLM_CACHE_ROOT", launcher)
+                self.assertIn("$OPD_CACHE_ROOT/vllm/", launcher)
+
 
 if __name__ == "__main__":
     unittest.main()

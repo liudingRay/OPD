@@ -48,15 +48,18 @@ export HF_HOME="$OPD_CACHE_ROOT/huggingface"
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
 export HF_HUB_CACHE="$HF_HOME/hub"
 export OUTLINES_CACHE_DIR="$OPD_CACHE_ROOT/outlines/${SLURM_JOB_ID}"
+export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-$OPD_CACHE_ROOT/vllm/${SLURM_JOB_ID}}"
 unset ROCR_VISIBLE_DEVICES
 
 mkdir -p "$PROJECT_DIR/logs" "$EVAL_OUTPUT_ROOT" "$TRITON_CACHE_DIR" \
-    "$TORCHINDUCTOR_CACHE_DIR" "$HF_DATASETS_CACHE" "$HF_HUB_CACHE" "$OUTLINES_CACHE_DIR"
+    "$TORCHINDUCTOR_CACHE_DIR" "$HF_DATASETS_CACHE" "$HF_HUB_CACHE" "$OUTLINES_CACHE_DIR" \
+    "$VLLM_CACHE_ROOT"
 
 echo "Job ID: ${SLURM_JOB_ID}"
 echo "Node: $(hostname)"
 echo "Allocated GPUs: ${CUDA_VISIBLE_DEVICES:-not-set}"
 echo "Results: $EVAL_OUTPUT_ROOT"
+echo "vLLM cache: $VLLM_CACHE_ROOT"
 nvidia-smi
 
 cd "$PROJECT_DIR/scripts/val/eval"
