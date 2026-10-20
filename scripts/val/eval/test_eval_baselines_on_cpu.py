@@ -94,6 +94,19 @@ class EvalBaselinePromptTest(unittest.TestCase):
         shared_launcher = (leonardo_dir / "submit_eval_qwen3_model_1xa100.sbatch").read_text(encoding="utf-8")
         self.assertIn("#SBATCH --account=AIFAC_S07_051", shared_launcher)
 
+    def test_leonardo_routes_multiple_choice_to_the_separate_grader(self) -> None:
+        leonardo_dir = self.project_root / "leonardo"
+        shared_launcher = (leonardo_dir / "submit_eval_qwen3_model_1xa100.sbatch").read_text(encoding="utf-8")
+        self.assertIn("GRADER_SCRIPT=grade_multiple_choice.py", shared_launcher)
+        self.assertIn("GRADER_SCRIPT=grade.py", shared_launcher)
+        self.assertIn('python "$GRADER_SCRIPT"', shared_launcher)
+
+        for filename in ("eval-gpqa-qwen3-model-1xa100", "eval-mmlupro-qwen3-model-1xa100"):
+            launcher = (leonardo_dir / filename).read_text(encoding="utf-8")
+            with self.subTest(launcher=filename):
+                self.assertIn("scripts/val/eval/grade_multiple_choice.py", launcher)
+                self.assertNotIn('require_file "$PROJECT_DIR/scripts/val/eval/grade.py"', launcher)
+
     def test_leonardo_vllm_evaluations_use_project_cache(self) -> None:
         leonardo_dir = self.project_root / "leonardo"
         launchers = (

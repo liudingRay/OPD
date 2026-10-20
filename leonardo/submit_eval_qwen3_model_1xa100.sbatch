@@ -75,9 +75,12 @@ if [[ -n "$MAX_EXAMPLES" && ! "$MAX_EXAMPLES" =~ ^[1-9][0-9]*$ ]]; then
     echo "MAX_EXAMPLES must be empty or a positive integer; got: $MAX_EXAMPLES" >&2
     exit 2
 fi
+HAS_MULTIPLE_CHOICE_TASK=0
+HAS_OTHER_TASK=0
 for task in $TASKS; do
     case "$task" in
-        AIME24|AIME25|AMC23|MATH-500|GPQA|MMLU-Pro) ;;
+        GPQA|MMLU-Pro) HAS_MULTIPLE_CHOICE_TASK=1 ;;
+        AIME24|AIME25|AMC23|MATH-500) HAS_OTHER_TASK=1 ;;
         *)
             echo "Unsupported task: $task (supported: AIME24 AIME25 AMC23 MATH-500 GPQA MMLU-Pro)" >&2
             exit 2
@@ -88,6 +91,19 @@ for task in $TASKS; do
         exit 1
     fi
 done
+if [[ "$HAS_MULTIPLE_CHOICE_TASK" == 1 && "$HAS_OTHER_TASK" == 1 ]]; then
+    echo "Do not mix multiple-choice and math tasks in one evaluation; they use separate graders." >&2
+    exit 2
+fi
+if [[ "$HAS_MULTIPLE_CHOICE_TASK" == 1 ]]; then
+    GRADER_SCRIPT=grade_multiple_choice.py
+else
+    GRADER_SCRIPT=grade.py
+fi
+if [[ ! -f "$PROJECT_DIR/scripts/val/eval/$GRADER_SCRIPT" ]]; then
+    echo "Grader is missing: $PROJECT_DIR/scripts/val/eval/$GRADER_SCRIPT" >&2
+    exit 1
+fi
 
 set +u
 source "$CONDA_BASE/etc/profile.d/conda.sh"
@@ -120,6 +136,7 @@ echo "Sampling: temperature=$TEMPERATURE, top_p=$TOP_P, top_k=$TOP_K, min_p=$MIN
 echo "Base seed: $SEED (rollout i uses seed+i)"
 echo "Max tokens: $MAX_TOKENS"
 echo "Overwrite: $EVAL_OVERWRITE"
+echo "Grader: $GRADER_SCRIPT"
 echo "Results: $EVAL_OUTPUT_ROOT"
 echo "vLLM cache: $VLLM_CACHE_ROOT"
 python --version
@@ -155,7 +172,7 @@ if [[ "$EVAL_OVERWRITE" == 1 ]]; then
 fi
 python eval_baselines.py "${GENERATOR_ARGS[@]}"
 
-python grade.py \
+python "$GRADER_SCRIPT" \
     --eval-dir "$EVAL_OUTPUT_ROOT/$MODEL_NAME" \
     --length-tokenizer "$MODEL_PATH"
 

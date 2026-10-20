@@ -49,7 +49,7 @@ if ! compgen -G "$MODEL_PATH/model*.safetensors" >/dev/null; then
 fi
 require_file "$DATA_DIR/GPQA/test.parquet"
 require_file "$PROJECT_DIR/scripts/val/eval/eval_baselines.py"
-require_file "$PROJECT_DIR/scripts/val/eval/grade.py"
+require_file "$PROJECT_DIR/scripts/val/eval/grade_multiple_choice.py"
 require_file "$PROJECT_DIR/scripts/val/eval/summarize_baseline_results.py"
 
 export PROJECT_DIR
