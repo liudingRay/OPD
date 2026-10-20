@@ -37,6 +37,20 @@ export NLTK_DATA=/ABSOLUTE/PERSISTENT/NLTK_DATA
 The evaluation script never downloads NLTK data implicitly. It fails before
 loading the GPU model if the scorer or `punkt_tab` resource is unavailable.
 
+On Leonardo, keep these additions out of the shared `opd-cu118` environment.
+The dedicated installer writes exact scorer additions and NLTK data under the
+OPD cache, validates them, and confirms that the base environment package hash
+did not change:
+
+```bash
+cd /leonardo_work/EUHPC_D33_157/OPD-experiment/OPD
+bash leonardo/install-ifeval-scorer-deps
+```
+
+`leonardo/eval-ifeval-qwen3-model-1xa100` automatically uses those isolated
+directories. Override `IFEVAL_DEPS_DIR` or `NLTK_DATA` only when intentionally
+using another validated isolated installation.
+
 ## Run
 
 From the repository root:

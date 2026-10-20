@@ -142,6 +142,8 @@ class IFEvalPipelineTest(unittest.TestCase):
             "MIN_P=${MIN_P:-0.0}",
             "MAX_TOKENS=${MAX_TOKENS:-4096}",
             "SEED=${SEED:-0}",
+            "IFEVAL_DEPS_DIR=${IFEVAL_DEPS_DIR:-$OPD_CACHE_ROOT/ifeval-scorer-py312}",
+            "NLTK_DATA=${NLTK_DATA:-$OPD_CACHE_ROOT/nltk-ifeval}",
         )
         for assignment in expected_defaults:
             with self.subTest(assignment=assignment):

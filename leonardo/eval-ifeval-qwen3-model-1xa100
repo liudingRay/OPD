@@ -27,7 +27,8 @@ PROJECT_DIR=${PROJECT_DIR:-/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD}
 CONDA_BASE=${CONDA_BASE:-/leonardo/home/userexternal/jbi00000/miniconda3}
 CONDA_ENV=${CONDA_ENV:-/leonardo_work/EUHPC_D33_157/jbi00000/conda_envs/opd-cu118}
 OPD_CACHE_ROOT=${OPD_CACHE_ROOT:-/leonardo_work/EUHPC_D33_157/OPD-experiment/.cache/opd}
-NLTK_DATA=${NLTK_DATA:-$OPD_CACHE_ROOT/nltk}
+IFEVAL_DEPS_DIR=${IFEVAL_DEPS_DIR:-$OPD_CACHE_ROOT/ifeval-scorer-py312}
+NLTK_DATA=${NLTK_DATA:-$OPD_CACHE_ROOT/nltk-ifeval}
 
 if [[ -z ${MODEL_NAME:-} || -z ${MODEL_PATH:-} ]]; then
     echo "Set both MODEL_NAME and the absolute MODEL_PATH for the model to evaluate." >&2
@@ -110,6 +111,7 @@ require_dir() {
 
 require_dir "$PROJECT_DIR"
 require_dir "$MODEL_PATH"
+require_dir "$IFEVAL_DEPS_DIR"
 require_file "$MODEL_PATH/config.json"
 if ! compgen -G "$MODEL_PATH/model*.safetensors" >/dev/null; then
     echo "Hugging Face model weights are missing from: $MODEL_PATH" >&2
@@ -120,6 +122,10 @@ require_file "$PROJECT_DIR/scripts/val/eval/eval_ifeval.py"
 require_file "$PROJECT_DIR/scripts/val/eval/grade_ifeval.py"
 require_dir "$PROJECT_DIR/scripts/val/eval/ifeval_scorer"
 require_dir "$NLTK_DATA/tokenizers/punkt_tab"
+
+PYTHONPATH="$IFEVAL_DEPS_DIR:$PROJECT_DIR/scripts/val/eval:$PROJECT_DIR/verl${PYTHONPATH:+:$PYTHONPATH}" \
+    NLTK_DATA="$NLTK_DATA" \
+    "$CONDA_ENV/bin/python" -c "import grade_ifeval; grade_ifeval.validate_scorer_environment()"
 
 echo "Leonardo IFEval configuration"
 echo "  model name:      $MODEL_NAME"
@@ -133,6 +139,7 @@ echo "  sampling:        temperature=$TEMPERATURE, top_p=$TOP_P, top_k=$TOP_K, m
 echo "  seed:            $SEED"
 echo "  max tokens:      $MAX_TOKENS"
 echo "  overwrite:       $EVAL_OVERWRITE"
+echo "  scorer packages: $IFEVAL_DEPS_DIR"
 echo "  NLTK data:       $NLTK_DATA"
 echo "  Slurm resources: 1 x A100, 8 CPUs, 120G RAM, time=$EVAL_TIME_LIMIT"
 
@@ -143,7 +150,7 @@ fi
 
 if [[ -z ${SLURM_JOB_ID:-} ]]; then
     mkdir -p "$LOG_DIR"
-    export PROJECT_DIR CONDA_BASE CONDA_ENV OPD_CACHE_ROOT NLTK_DATA
+    export PROJECT_DIR CONDA_BASE CONDA_ENV OPD_CACHE_ROOT IFEVAL_DEPS_DIR NLTK_DATA
     export MODEL_NAME MODEL_PATH ENABLE_THINKING NUM_SAMPLES TEMPERATURE TOP_P TOP_K MIN_P
     export MAX_TOKENS SEED MAX_EXAMPLES EVAL_OVERWRITE GPU_MEMORY_UTILIZATION DTYPE
     export EVAL_OUTPUT_ROOT EVAL_JOB_NAME EVAL_TIME_LIMIT LOG_DIR
@@ -163,7 +170,7 @@ conda activate "$CONDA_ENV"
 set -u
 cd "$PROJECT_DIR"
 
-export PYTHONPATH="$PROJECT_DIR/verl${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$IFEVAL_DEPS_DIR:$PROJECT_DIR/verl${PYTHONPATH:+:$PYTHONPATH}"
 export HF_HOME=${HF_HOME:-$OPD_CACHE_ROOT/huggingface}
 export HF_DATASETS_CACHE=${HF_DATASETS_CACHE:-$HF_HOME/datasets}
 export HF_HUB_CACHE=${HF_HUB_CACHE:-$HF_HOME/hub}

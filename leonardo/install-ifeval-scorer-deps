@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Install IFEval's CPU-only scorer additions beside, not inside, the Leonardo
+# opd-cu118 Conda environment. Existing complete targets are validated/reused;
+# incomplete targets are never overwritten automatically.
+
+set -euo pipefail
+
+PROJECT_DIR=${PROJECT_DIR:-/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD}
+CONDA_BASE=${CONDA_BASE:-/leonardo/home/userexternal/jbi00000/miniconda3}
+CONDA_ENV=${CONDA_ENV:-/leonardo_work/EUHPC_D33_157/jbi00000/conda_envs/opd-cu118}
+OPD_CACHE_ROOT=${OPD_CACHE_ROOT:-/leonardo_work/EUHPC_D33_157/OPD-experiment/.cache/opd}
+IFEVAL_DEPS_DIR=${IFEVAL_DEPS_DIR:-$OPD_CACHE_ROOT/ifeval-scorer-py312}
+NLTK_DATA=${NLTK_DATA:-$OPD_CACHE_ROOT/nltk-ifeval}
+REQUIREMENTS_FILE=${REQUIREMENTS_FILE:-$PROJECT_DIR/leonardo/requirements-ifeval-isolated.txt}
+PIP_CACHE_DIR=${PIP_CACHE_DIR:-$OPD_CACHE_ROOT/pip}
+
+require_file() {
+    if [[ ! -f "$1" ]]; then
+        echo "Required file is missing: $1" >&2
+        exit 1
+    fi
+}
+
+require_dir() {
+    if [[ ! -d "$1" ]]; then
+        echo "Required directory is missing: $1" >&2
+        exit 1
+    fi
+}
+
+require_dir "$PROJECT_DIR"
+require_file "$CONDA_BASE/etc/profile.d/conda.sh"
+require_file "$CONDA_ENV/bin/python"
+require_file "$REQUIREMENTS_FILE"
+require_file "$PROJECT_DIR/scripts/val/eval/grade_ifeval.py"
+
+mkdir -p "$OPD_CACHE_ROOT" "$PIP_CACHE_DIR"
+
+set +u
+source "$CONDA_BASE/etc/profile.d/conda.sh"
+conda activate "$CONDA_ENV"
+set -u
+
+BASE_ENV_BEFORE=$(PYTHONPATH= python -m pip freeze --all | sha256sum | cut -d' ' -f1)
+
+if [[ -e "$IFEVAL_DEPS_DIR" ]]; then
+    require_dir "$IFEVAL_DEPS_DIR"
+    echo "Reusing existing isolated Python dependencies: $IFEVAL_DEPS_DIR"
+else
+    DEPS_STAGING=$(mktemp -d "$OPD_CACHE_ROOT/.ifeval-scorer-py312.staging.XXXXXX")
+    echo "Installing isolated Python dependencies into staging: $DEPS_STAGING"
+    PIP_CACHE_DIR="$PIP_CACHE_DIR" python -m pip install \
+        --disable-pip-version-check \
+        --no-input \
+        --no-deps \
+        --target "$DEPS_STAGING" \
+        --requirement "$REQUIREMENTS_FILE"
+    PYTHONPATH="$DEPS_STAGING${PYTHONPATH:+:$PYTHONPATH}" python - <<'PY'
+import immutabledict
+import joblib
+import langdetect
+import nltk
+
+print("Validated isolated imports before publication.")
+PY
+    mv "$DEPS_STAGING" "$IFEVAL_DEPS_DIR"
+    echo "Published isolated Python dependencies: $IFEVAL_DEPS_DIR"
+fi
+
+if [[ -e "$NLTK_DATA" ]]; then
+    require_dir "$NLTK_DATA/tokenizers/punkt_tab"
+    echo "Reusing existing NLTK data: $NLTK_DATA"
+else
+    NLTK_STAGING=$(mktemp -d "$OPD_CACHE_ROOT/.nltk-ifeval.staging.XXXXXX")
+    echo "Downloading punkt_tab into staging: $NLTK_STAGING"
+    PYTHONPATH="$IFEVAL_DEPS_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+        python -m nltk.downloader -d "$NLTK_STAGING" punkt_tab
+    require_dir "$NLTK_STAGING/tokenizers/punkt_tab"
+    mv "$NLTK_STAGING" "$NLTK_DATA"
+    echo "Published NLTK data: $NLTK_DATA"
+fi
+
+export PYTHONPATH="$IFEVAL_DEPS_DIR:$PROJECT_DIR/scripts/val/eval:$PROJECT_DIR/verl${PYTHONPATH:+:$PYTHONPATH}"
+export NLTK_DATA
+python -c "import grade_ifeval; grade_ifeval.validate_scorer_environment()"
+python -m pip check
+
+BASE_ENV_AFTER=$(PYTHONPATH= python -m pip freeze --all | sha256sum | cut -d' ' -f1)
+if [[ "$BASE_ENV_AFTER" != "$BASE_ENV_BEFORE" ]]; then
+    echo "Base Conda environment package metadata changed unexpectedly." >&2
+    echo "Before: $BASE_ENV_BEFORE" >&2
+    echo "After:  $BASE_ENV_AFTER" >&2
+    exit 1
+fi
+
+echo "IFEval scorer dependencies are ready."
+echo "  isolated Python packages: $IFEVAL_DEPS_DIR"
+echo "  isolated NLTK data:       $NLTK_DATA"
+echo "  base environment hash:    $BASE_ENV_AFTER (unchanged)"
