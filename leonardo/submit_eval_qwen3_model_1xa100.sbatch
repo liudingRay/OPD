@@ -6,7 +6,7 @@
 #   MODEL_NAME=... MODEL_PATH=/absolute/model/path \
 #     sbatch --export=ALL leonardo/submit_eval_qwen3_model_1xa100.sbatch
 #SBATCH --job-name=eval-qwen3-model
-#SBATCH --account=EUHPC_D33_157
+#SBATCH --account=AIFAC_S07_051
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

@@ -15,6 +15,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_DIR=${PROJECT_DIR:-/leonardo_work/EUHPC_D33_157/OPD-experiment/OPD}
 DATA_DIR=${DATA_DIR:-$PROJECT_DIR/datasets/test_data}
 LOG_DIR=${LOG_DIR:-$PROJECT_DIR/logs}
+EVAL_ACCOUNT=${EVAL_ACCOUNT:-AIFAC_S07_051}
 
 if [[ -z ${MODEL_NAME:-} || -z ${MODEL_PATH:-} ]]; then
     echo "Set both MODEL_NAME and the absolute MODEL_PATH for the model to evaluate." >&2
@@ -99,6 +100,7 @@ if [[ "$DRY_RUN" == 1 ]]; then
     echo "  output root: ${EVAL_OUTPUT_ROOT:-$PROJECT_DIR/scripts/val/eval/justrl_eval_outputs/$MODEL_NAME-nonthinking-$EVAL_PROTOCOL_LABEL-n$NUM_SAMPLES}"
     echo "  samples:     $NUM_SAMPLES"
     echo "  max examples: ${MAX_EXAMPLES:-all}"
+    echo "  Slurm account: $EVAL_ACCOUNT"
     echo "DRY_RUN=1: no Slurm job was submitted."
     exit 0
 fi
@@ -106,6 +108,7 @@ fi
 mkdir -p "$LOG_DIR"
 export EVAL_JOB_NAME EVAL_TIME_LIMIT EVAL_PROTOCOL_LABEL LOG_DIR
 exec sbatch \
+    --account="$EVAL_ACCOUNT" \
     --job-name="$EVAL_JOB_NAME" \
     --time="$EVAL_TIME_LIMIT" \
     --export=ALL \

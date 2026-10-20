@@ -87,7 +87,12 @@ class EvalBaselinePromptTest(unittest.TestCase):
                 self.assertIn("export MIN_P=0.0", launcher)
                 self.assertIn("export MAX_TOKENS=38912", launcher)
                 self.assertIn("export SEED=0", launcher)
+                self.assertIn("EVAL_ACCOUNT=${EVAL_ACCOUNT:-AIFAC_S07_051}", launcher)
+                self.assertIn('--account="$EVAL_ACCOUNT"', launcher)
                 self.assertIn("submit_eval_qwen3_model_1xa100.sbatch", launcher)
+
+        shared_launcher = (leonardo_dir / "submit_eval_qwen3_model_1xa100.sbatch").read_text(encoding="utf-8")
+        self.assertIn("#SBATCH --account=AIFAC_S07_051", shared_launcher)
 
 
 if __name__ == "__main__":
