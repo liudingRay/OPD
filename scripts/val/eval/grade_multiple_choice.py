@@ -18,13 +18,17 @@ from pathlib import Path
 from typing import Callable
 
 
-SUPPORTED_TASKS = frozenset({"gpqa", "mmlu-pro"})
+TASK_OPTIONS = {
+    "gpqa": frozenset("ABCD"),
+    "mmlu-pro": frozenset("ABCDEFGHIJ"),
+}
+SUPPORTED_TASKS = frozenset(TASK_OPTIONS)
 FILENAME_PATTERN = re.compile(
     r"^(?P<task>gpqa|mmlu-pro)_t(?P<temperature>[\d.]+)_p(?P<top_p>[\d.]+)"
     r"_n(?P<n>\d+)-MNT(?P<max_tokens>\d+)$"
 )
 LEADING_FORMAT_COMMAND = re.compile(r"^\\(?:text|textrm|textbf|mathrm|mathbf|operatorname)\s*")
-OPTION_PATTERN = re.compile(r"^(?:option\s*)?([A-D])(?=$|[\s.\):=,;\\}\]\-])", re.IGNORECASE)
+OPTION_PATTERN = re.compile(r"^(?:option\s*)?([A-J])(?=$|[\s.\):=,;\\}\]\-])", re.IGNORECASE)
 
 
 def extract_last_boxed_content(response: str) -> str | None:
@@ -87,7 +91,7 @@ def parse_hyperparameters(file_path: Path) -> dict[str, str]:
     return match.groupdict()
 
 
-def load_grouped_responses(file_path: Path) -> list[dict[str, object]]:
+def load_grouped_responses(file_path: Path, allowed_options: frozenset[str]) -> list[dict[str, object]]:
     grouped: OrderedDict[object, dict[str, object]] = OrderedDict()
     with file_path.open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
@@ -98,9 +102,10 @@ def load_grouped_responses(file_path: Path) -> list[dict[str, object]]:
                 response = str(record["response"])
             except KeyError as exc:
                 raise ValueError(f"{file_path}:{line_number} is missing {exc.args[0]!r}") from exc
-            if ground_truth not in {"A", "B", "C", "D"}:
+            if ground_truth not in allowed_options:
                 raise ValueError(
-                    f"{file_path}:{line_number} has unsupported ground truth {ground_truth!r}; expected A-D"
+                    f"{file_path}:{line_number} has unsupported ground truth {ground_truth!r}; "
+                    f"expected one of {''.join(sorted(allowed_options))}"
                 )
 
             item = grouped.setdefault(example_id, {"ground_truth": ground_truth, "responses": []})
@@ -121,7 +126,8 @@ def grade_file(file_path: Path, get_length: Callable[[str], int] = len) -> dict[
     hyperparameters["task_name"] = task_name
 
     expected_samples = int(hyperparameters["n"])
-    grouped = load_grouped_responses(file_path)
+    allowed_options = TASK_OPTIONS[task_name]
+    grouped = load_grouped_responses(file_path, allowed_options)
     question_scores: list[float] = []
     question_best: list[bool] = []
     diversity_scores: list[float] = []
@@ -139,8 +145,9 @@ def grade_file(file_path: Path, get_length: Callable[[str], int] = len) -> dict[
         scores = []
         for response in responses:
             option = extract_boxed_option(response)
-            if option is None:
+            if option not in allowed_options:
                 format_errors += 1
+                option = None
             else:
                 parsed_rollouts += 1
             scores.append(option == ground_truth)

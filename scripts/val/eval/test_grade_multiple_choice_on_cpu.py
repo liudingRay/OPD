@@ -19,6 +19,7 @@ class MultipleChoiceAnswerExtractionTest(unittest.TestCase):
             r"Final: \boxed{C. Cold atomic interstellar medium}": "C",
             r"Final: \boxed{\text{D. answer text}}": "D",
             r"Final: \boxed{\mathbf{Option A: answer text}}": "A",
+            r"Final: \boxed{\text{I. MMLU-Pro answer text}}": "I",
             r"First \boxed{A}, corrected to \boxed{\mathrm{B. final}}": "B",
         }
         for response, expected in cases.items():
@@ -68,6 +69,31 @@ class MultipleChoiceAnswerExtractionTest(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "expected 2 responses per question"):
                 grade_multiple_choice.grade_file(result_path)
+
+    def test_mmlu_pro_accepts_options_a_through_j(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result_path = Path(temporary_directory) / "mmlu-pro_t0.7_p0.8_n1-MNT100.jsonl"
+            result_path.write_text(
+                json.dumps({"example_id": 0, "answer": "I", "response": r"\boxed{\text{I. answer text}}"})
+                + "\n",
+                encoding="utf-8",
+            )
+            result = grade_multiple_choice.grade_file(result_path)
+
+        self.assertEqual(result["mean_score"], 1.0)
+        self.assertEqual(result["format_error_rollouts"], 0)
+
+    def test_gpqa_rejects_options_outside_a_through_d(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result_path = Path(temporary_directory) / "gpqa_t0.7_p0.8_n1-MNT100.jsonl"
+            result_path.write_text(
+                json.dumps({"example_id": 0, "answer": "A", "response": r"\boxed{I. invalid for GPQA}"}) + "\n",
+                encoding="utf-8",
+            )
+            result = grade_multiple_choice.grade_file(result_path)
+
+        self.assertEqual(result["mean_score"], 0.0)
+        self.assertEqual(result["format_error_rollouts"], 1)
 
 
 if __name__ == "__main__":
