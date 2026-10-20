@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# One-node, four-A100 equal-weight Qwen3-4B/8B/14B OPD baseline on Leonardo.
+# The official post-trained Qwen3-1.7B student generates every trajectory.
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+export TRAINER_NNODES=1
+export SMOKE=${SMOKE:-0}
+export N_RESPONSES=2
+export MAX_RESP_LENGTH=7680
+export MAX_VAL_RESP_LENGTH=7680
+export TRAIN_MAX_SAMPLES=-1
+export DATA_SHUFFLE=True
+export DATA_SEED=42
+export TRAINER_TOTAL_EPOCHS=2
+export TRAINER_SAVE_FREQ=${TRAINER_SAVE_FREQ:-50}
+export TRAINER_MAX_ACTOR_CKPT_TO_KEEP=${TRAINER_MAX_ACTOR_CKPT_TO_KEEP:-3}
+export TRAINER_MAX_CRITIC_CKPT_TO_KEEP=${TRAINER_MAX_CRITIC_CKPT_TO_KEEP:-3}
+export TRAINER_PROTECTED_CHECKPOINT_STEPS=${TRAINER_PROTECTED_CHECKPOINT_STEPS:-'[200,400,600]'}
+export TRAINER_RESUME_MODE=${TRAINER_RESUME_MODE:-auto}
+export ROLLOUT_ENFORCE_EAGER=False
+export CUDAGRAPH_CAPTURE_SIZES='[1,2,4,8,16,32]'
+export WANDB_MODE=${WANDB_MODE:-offline}
+
+if [[ "$SMOKE" == 1 ]]; then
+    export SMOKE_STEPS=${SMOKE_STEPS:-1}
+    export SMOKE_GPUS=${SMOKE_GPUS:-2}
+    export SMOKE_CPUS=${SMOKE_CPUS:-16}
+    export SMOKE_TIME=${SMOKE_TIME:-02:00:00}
+    export SMOKE_PRESERVE_SCIENTIFIC_SETTINGS=1
+    export EXPERIMENT_SUFFIX=${EXPERIMENT_SUFFIX:-'-full-r7680-seed42-2xa100-smoke'}
+else
+    export EXPERIMENT_SUFFIX=${EXPERIMENT_SUFFIX:-'-full-r7680-seed42-4xa100'}
+fi
+
+exec bash "$SCRIPT_DIR/curriculum-opd" "${MULTITEACHER_STAGE:-uniform3}"
