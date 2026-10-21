@@ -38,6 +38,7 @@ if [[ "$SMOKE" == 1 ]]; then
     export SMOKE_CPUS=${SMOKE_CPUS:-32}
     export EXPERIMENT_SUFFIX=${EXPERIMENT_SUFFIX:-"-full-r7680-seed42-${SMOKE_NNODES}node-${SMOKE_GPUS}xa100-smoke"}
 else
+    export EXPERIMENT_NAME=${EXPERIMENT_NAME:-multiteacher2-eu-ln-softmax-b0.0-tau0.1-gain15.0-center0.25-clip0.1-1.9}
     export EXPERIMENT_SUFFIX=${EXPERIMENT_SUFFIX:-"-full-r7680-seed42-${TRAINER_NNODES}node-4xa100"}
 fi
 
