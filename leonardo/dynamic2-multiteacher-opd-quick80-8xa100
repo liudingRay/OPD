@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Independent non-thinking EULN routing experiment using the official
+# Qwen3-1.7B student with frozen official Qwen3-4B and Qwen3-14B teachers.
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+export MULTITEACHER_STAGE=dynamic2
+export TEACHER_WEIGHT_MODE=${TEACHER_WEIGHT_MODE:-eu_ln_softmax}
+export TEACHER_EMA_BETA=${TEACHER_EMA_BETA:-0.0}
+export TEACHER_SELECTION_TAU=${TEACHER_SELECTION_TAU:-0.1}
+export TEACHER_EU_COEFFICIENT_GAIN=${TEACHER_EU_COEFFICIENT_GAIN:-15.0}
+export TEACHER_EU_NORMALIZED_CENTER=${TEACHER_EU_NORMALIZED_CENTER:-0.25}
+export TEACHER_EU_COEFFICIENT_MIN=${TEACHER_EU_COEFFICIENT_MIN:-0.1}
+export TEACHER_EU_COEFFICIENT_MAX=${TEACHER_EU_COEFFICIENT_MAX:-1.9}
+export ENABLE_THINKING=${ENABLE_THINKING:-0}
+export TEMPERATURE=${TEMPERATURE:-1.0}
+export TOP_P=${TOP_P:-1.0}
+export GENERATION_TOP_K=${GENERATION_TOP_K:-20}
+export VAL_TEMPERATURE=${VAL_TEMPERATURE:-0.7}
+export VAL_TOP_P=${VAL_TOP_P:-0.8}
+export VAL_TOP_K=${VAL_TOP_K:-$GENERATION_TOP_K}
+# Match the verified Leonardo dynamic3 runtime workaround. Eager rollout avoids
+# the torch 2.6.0 + vLLM 0.8.5 CUDA Graph/NCCL startup deadlock without changing
+# sampling or EULN training math.
+export ROLLOUT_ENFORCE_EAGER=${ROLLOUT_ENFORCE_EAGER:-True}
+export CUDAGRAPH_CAPTURE_SIZES=${CUDAGRAPH_CAPTURE_SIZES:-null}
+export TRAINER_SAVE_FREQ=${TRAINER_SAVE_FREQ:-400}
+export TRAINER_PROTECTED_CHECKPOINT_STEPS=${TRAINER_PROTECTED_CHECKPOINT_STEPS:-'[400,800]'}
+export TRAINER_TOTAL_TRAINING_STEPS=${TRAINER_TOTAL_TRAINING_STEPS:-1118}
+export SMOKE=${SMOKE:-0}
+export TRAINER_NNODES=${TRAINER_NNODES:-2}
+
+if [[ "$SMOKE" == 1 ]]; then
+    export SMOKE_STEPS=${SMOKE_STEPS:-1}
+    export SMOKE_NNODES=${SMOKE_NNODES:-2}
+    export SMOKE_GPUS=${SMOKE_GPUS:-4}
+    export SMOKE_CPUS=${SMOKE_CPUS:-32}
+    export EXPERIMENT_SUFFIX=${EXPERIMENT_SUFFIX:-"-full-r7680-seed42-${SMOKE_NNODES}node-${SMOKE_GPUS}xa100-smoke"}
+else
+    export EXPERIMENT_SUFFIX=${EXPERIMENT_SUFFIX:-"-full-r7680-seed42-${TRAINER_NNODES}node-4xa100"}
+fi
+
+exec bash "$SCRIPT_DIR/multiteacher-opd-quick80-4xa100"
